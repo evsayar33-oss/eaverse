@@ -128,6 +128,33 @@ def render_panel(payload):
     source[0].link_button("Araştırma çalışması", payload["run_url"])
     source[1].link_button("Kayıt kaynağı", RELEASE_URL)
 
+    research = payload.get("research")
+    st.subheader("Araştırma sayacı")
+    if research is None:
+        st.info("Bu eski kayıtta araştırma sayaçları yok. Yeni araştırma yayını bekleniyor.")
+    else:
+        cols = st.columns(4)
+        cols[0].metric("Teknik strateji denemesi", research["total_trials"],
+                       delta=f"Son tur: +{research['new_trials']}")
+        cols[1].metric("Farklı strateji ayarı", research["unique_strategies"])
+        cols[2].metric("Olay denemesi", research["total_event_trials"],
+                       delta=f"Son tur: +{research['new_event_trials']}")
+        cols[3].metric("Test edilen varlık", research["tested_assets"])
+        st.caption("Teknik deneme sayısı varlık × strateji × araştırma sürümü kayıtlarını sayar. "
+                   "Aynı stratejinin farklı varlıklardaki testleri ayrı denemedir. Farklı strateji ayarı "
+                   "tekrarsız kural ve parametre birleşimlerini sayar. Arşivlenen denemeler toplama dahildir.")
+        if research["new_trials"] + research["new_event_trials"] == 0:
+            st.warning("Son yayımlanan turda yeni deneme kaydedilmedi.")
+        else:
+            st.success(f"Son yayımlanan turda {research['new_trials']} teknik ve "
+                       f"{research['new_event_trials']} olay denemesi kaydedildi.")
+        st.caption("Sayaçlar tamamlanan araştırma kayıtlarından gelir; açık sayfa 5 dakikada bir yenilenir. "
+                   "Deneme sayısı kârlı veya PAPER izlemeye uygun strateji sayısı değildir.")
+        with st.expander("Varlık bazında denemeler"):
+            st.dataframe(pd.DataFrame(research["assets"], columns=["asset", "total_trials", "new_trials"])
+                         .rename(columns={"asset": "Varlık", "total_trials": "Toplam teknik deneme",
+                                          "new_trials": "Son turda yeni"}), hide_index=True)
+
     if not entries:
         st.info("Henüz PAPER izlemeye alınmış strateji yok.")
         return

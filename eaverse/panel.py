@@ -38,6 +38,17 @@ def projection(db_path, report, run_url):
     entries = []
     with sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
+        research = {
+            "total_trials": db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0],
+            "unique_strategies": db.execute("SELECT COUNT(DISTINCT id) FROM attempts").fetchone()[0],
+            "total_event_trials": db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0],
+            "tested_assets": db.execute("SELECT COUNT(DISTINCT asset) FROM attempts").fetchone()[0],
+            "new_trials": sum(item.get("new_trials", 0) for item in assets.values()),
+            "new_event_trials": sum(item.get("events", {}).get("new_trials", 0) for item in assets.values()),
+            "assets": [{"asset": row[0], "total_trials": row[1],
+                        "new_trials": assets.get(row[0], {}).get("new_trials", 0)}
+                       for row in db.execute("SELECT asset,COUNT(*) FROM attempts GROUP BY asset ORDER BY asset")],
+        }
         for row in db.execute("""
             SELECT paper.*, paper_progress.metrics
             FROM paper LEFT JOIN paper_progress USING(sequence)
@@ -53,7 +64,7 @@ def projection(db_path, report, run_url):
             entries.append(entry)
     return {
         "schema": 1, "published_at": report["time"], "run_url": run_url,
-        "entries": entries,
+        "entries": entries, "research": research,
     }
 
 

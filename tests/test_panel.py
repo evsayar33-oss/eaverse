@@ -13,6 +13,28 @@ from test_research import market_frame
 
 
 class PanelTests(unittest.TestCase):
+    def test_counters_include_archived_keys_and_render_without_paper(self):
+        with tempfile.TemporaryDirectory() as work:
+            db_path = Path(work) / "test.sqlite"
+            with engine.connect(db_path) as db:
+                for asset, key in [("US:A", "one"), ("US:B", "one"), ("US:B", "two")]:
+                    db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                               ("v1", asset, key, "sma", "", "", "", "", "", "", "{}"))
+            snapshot = panel.projection(db_path, {
+                "time": datetime.now(UTC).isoformat(),
+                "assets": {"US:B": {"new_trials": 2, "events": {"new_trials": 0}}},
+            }, "https://example.org/run")
+            counters = snapshot["research"]
+            self.assertEqual((counters["total_trials"], counters["unique_strategies"],
+                              counters["tested_assets"], counters["new_trials"]), (3, 2, 2, 2))
+            feed = Path(work) / "panel.json"
+            feed.write_text(json.dumps(snapshot))
+            with patch.dict("os.environ", {"EAVERSE_DASHBOARD_FILE": str(feed)}):
+                app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.metric[0].value, "3")
+            self.assertIn("2 teknik", app.success[0].value)
+
     def test_trade_statistics_include_explicit_exit_fees(self):
         returns = pd.Series([0.10, -0.02, -0.05, -0.01, 0.0])
         weights = pd.Series([1.0, 0.0, 1.0, 0.0, 0.0])
@@ -53,5 +75,7 @@ class PanelTests(unittest.TestCase):
                 app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
             self.assertFalse(app.exception)
             self.assertEqual([tab.label for tab in app.tabs], ["Güncel PAPER", "İzleme öncesi backtest"])
-            self.assertIn("+12,00%", app.dataframe[0].value["Keşif net"].values)
-            self.assertEqual(app.metric[0].label, "Net getiri")
+            self.assertIn("+12,00%", app.dataframe[1].value["Keşif net"].values)
+            self.assertIn("Net getiri", [item.label for item in app.metric])
+            self.assertEqual(snapshot["research"]["total_trials"], 0)
+            self.assertEqual(app.metric[0].value, "0")
