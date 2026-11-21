@@ -298,11 +298,13 @@ def discover(db, asset, market, bars, now, budget):
         desired = research.target(bars, signals, spec, periods)
         validation = research.history_metrics(bars, desired, validation_index, market.cost_bps, periods)
         discovery_report = research.history_metrics(bars, desired, discovery_index, market.cost_bps, periods)
+        from .reference import audit_validation
+        validation["execution_audit"] = audit_validation(bars, desired, market.cost_bps, validation)
         db.execute("UPDATE attempts SET validated=? WHERE version=? AND asset=? AND id=?",
                    (research.canonical(validation), research.VERSION, asset, key))
         nominee = {"id": key, "spec": spec, "validation": validation}
         active_count = db.execute("SELECT count(*) FROM paper WHERE status='active'").fetchone()[0]
-        if validation["pass"] and active_count < 12:
+        if validation["pass"] and validation["execution_audit"]["status"] != "mismatch" and active_count < 12:
             start = (now.date() + timedelta(days=1)).isoformat()
             if market.calendar:
                 import exchange_calendars as xcals

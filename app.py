@@ -221,6 +221,11 @@ def render_panel(payload):
             longer = item["extended"]
             st.caption(f"Ek uzun dönem backtesti · {longer['start']} – {longer['end']} · "
                        f"{duration(longer['start'], longer['end'])} · Net {pct(longer['net'], signed=True)}")
+        audit = origin.get("validation", {}).get("execution_audit", {})
+        if audit.get("status") == "matched":
+            st.caption(f"Bağımsız işlem kontrolü: {audit['round_trips']} giriş ve çıkış doğrulandı.")
+        elif audit.get("status") == "unsupported_fractional_sizing":
+            st.caption("Bağımsız işlem kontrolü kademeli pozisyon büyüklüğünü kapsamıyor.")
         rows = history_table(origin)
         if rows:
             st.dataframe(rows, hide_index=True)
