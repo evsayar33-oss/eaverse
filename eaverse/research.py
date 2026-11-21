@@ -29,6 +29,7 @@ STRATEGIC_FEATURES = set(FEATURES) - {"volume", "low_vol", "atr"}
 MIN_VALIDATION_BARS = 180
 PAPER_BARS = 90
 PAPER_TRADES = 8
+PAPER_EXECUTION_DELAY = 2
 DRAWDOWN_LIMIT = 0.25
 POLICY = {
     "history_version": VERSION,
@@ -39,6 +40,7 @@ POLICY = {
     "history_extra_delay_bars": 1,
     "history_total_min_trades": 6,
     "paper_bars": PAPER_BARS,
+    "paper_execution_delay_bars": PAPER_EXECUTION_DELAY,
     "paper_min_round_trips": PAPER_TRADES,
     "paper_max_drawdown": DRAWDOWN_LIMIT,
     "paper_family_alpha": 0.05,
@@ -217,7 +219,7 @@ def hac_p_value(excess, lag):
 
 
 def paper_metrics(bars, desired, start, stop, cost_bps, sequence):
-    returns, trades, _ = simulation(bars, desired, start, stop, 2 * cost_bps)
+    returns, trades, _ = simulation(bars, desired, start, stop, 2 * cost_bps, delay=PAPER_EXECUTION_DELAY)
     benchmark, _, _ = simulation(bars, pd.Series(1.0, index=bars.index), start, stop, 2 * cost_bps)
     measurements = stats(returns, trades)
     benchmark_net = stats(benchmark, 0)["net"]

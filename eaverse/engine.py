@@ -65,6 +65,16 @@ def date(index_value):
     return index_value.strftime("%Y-%m-%d")
 
 
+def update_pending_paper_policy(db, now):
+    # The initial checkpoint may contain proposals from the first publication.
+    # Upgrade only experiments whose first eligible opening has not occurred.
+    previous = {key: value for key, value in research.POLICY.items() if key != "paper_execution_delay_bars"}
+    db.execute(
+        "UPDATE paper SET policy=? WHERE status='active' AND cursor IS NULL AND start > ? AND policy=?",
+        (research.canonical(research.POLICY), now.date().isoformat(), research.canonical(previous)),
+    )
+
+
 def advance_paper(db, asset, bars):
     row = db.execute("SELECT * FROM paper WHERE asset = ? AND status = 'active'", (asset,)).fetchone()
     if row is None:
@@ -108,7 +118,8 @@ def advance_paper(db, asset, bars):
             f"maksimum düşüş %{100 * metrics['drawdown']:.2f}\n"
             f"Hipotez: {result['origin']['id'][:12]} · PAPER #{row['sequence']} · "
             f"p={metrics['p_value']:.3g}, eşik={metrics['alpha']:.3g}\n"
-            f"{os.environ.get('EAVERSE_EVIDENCE_URL', '')}",
+            f"{os.environ.get('EAVERSE_EVIDENCE_URL', '')}\n"
+            f"https://github.com/{os.environ.get('GITHUB_REPOSITORY', '')}/releases/tag/research-state-v1",
         )
     return {"status": status, "sequence": row["sequence"], "bars": days, **metrics}
 
@@ -167,6 +178,8 @@ def discover(db, asset, market, bars, now, budget):
 
 def run(db, market_names, budget):
     now = datetime.now(UTC)
+    with db:
+        update_pending_paper_policy(db, now)
     report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}}
     for market in data.MARKETS:
         if market.name not in market_names:
