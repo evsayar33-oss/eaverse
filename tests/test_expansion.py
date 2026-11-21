@@ -1,5 +1,6 @@
 import gzip
 import json
+import subprocess
 import unittest
 from datetime import UTC, date, datetime
 from unittest.mock import patch
@@ -7,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from eaverse import archive, data, engine, events, research, universe
+from eaverse import archive, checkpoint, data, engine, events, research, universe
 from test_research import market_frame
 
 
@@ -21,6 +22,22 @@ class ExpansionTests(unittest.TestCase):
         pairs = json.dumps([{"id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD", "status": "online"},
                             {"id": "ETH-EUR", "base_currency": "ETH", "quote_currency": "EUR", "status": "online"}])
         self.assertEqual(universe.coinbase_symbols(pairs), {"BTC-USD"})
+
+    def test_us_snapshot_preserves_coverage_when_live_source_fails(self):
+        with engine.connect(":memory:") as db, patch.object(universe, "fetch", side_effect=TimeoutError):
+            market = data.MARKETS[1]
+            symbols, status = universe.refresh(db, market, date(2026, 11, 21))
+        self.assertGreater(len(symbols), 7000)
+        self.assertEqual(status["coverage_mode"], "bundled_snapshot")
+        self.assertIn("AAPL", symbols)
+
+    def test_release_lookup_retries_transient_failure(self):
+        error = subprocess.CalledProcessError(1, ["gh"], stderr="upstream gateway (HTTP 502)")
+        with patch.object(checkpoint, "repository", return_value="owner/repo"), patch.object(
+            checkpoint, "gh", side_effect=[error, '{"assets":[]}']
+        ) as command, patch.object(checkpoint.time, "sleep"):
+            self.assertEqual(checkpoint.assets(), [])
+        self.assertEqual(command.call_count, 2)
 
     def test_rotation_prioritizes_paper_and_advances_discovery(self):
         market = data.MARKETS[0]

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from . import research
-from .universe import read_url
+from .universe import REFERENCE, read_url
 
 
 ARCHIVES = {
@@ -77,9 +77,18 @@ def refresh(db, today):
         if current:
             event_dates[row["family"]] = dates
         coverage[row["family"]] = {"dates": len(dates), "fetched": row["asof"], "usable": current, "error": row["error"]}
+    frozen = json.loads((REFERENCE / "us-macro-dates.json").read_text())
     for family in ARCHIVES:
-        if family not in coverage:
-            coverage[family] = {"usable": False, "dates": 0}
+        if family not in coverage or not coverage[family]["usable"]:
+            # A static archive is safe for historical windows ending on or before
+            # its last checked date. Older archived runs remain reproducible.
+            captured = frozen["asof"]
+            if (today - date.fromisoformat(captured)).days <= 3:
+                event_dates[family] = frozen["families"][family]
+                coverage[family] = {"usable": True, "dates": len(event_dates[family]),
+                                    "fetched": captured, "error": "bundled_snapshot"}
+            elif family not in coverage:
+                coverage[family] = {"usable": False, "dates": 0}
     return event_dates, coverage
 
 

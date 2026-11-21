@@ -10,7 +10,7 @@ Eaverse birden çok piyasada teknik strateji ve takvim hipotezlerini araştırı
 | BIST | KAP BIST şirketleri | Yahoo | 32 |
 | Kripto | Coinbase Exchange aktif USD spot pariteleri | Coinbase Exchange | 24 |
 
-Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Kuyruk her turda aktif PAPER varlıklarına öncelik verir. Kalan kapasite yeni sembollere ve daha önce işlem verisi doğrulanan varlıklara ayrılır. Her aday en az 600 ardışık tamamlanmış günlük bar ister. Yeni kotlar ve fiyat verisi eksik semboller raporda ayrı görünür. Listenin tamamı birden çok turda taranır. Mevcut BIST ve ABD listeleri geçmiş endeks üyeliğini, delist verisini ve geçmişteki tüm şirketleri kapsamaz.
+Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Canlı ABD listesi erişilemezse son başarılı liste veya tarihli SEC kopyası kullanılır. Rapor canlı liste, önbellek ve bu kopyayı ayırt eder. Kuyruk her turda aktif PAPER varlıklarına öncelik verir. Kalan kapasite yeni sembollere ve daha önce işlem verisi doğrulanan varlıklara ayrılır. Her aday en az 600 ardışık tamamlanmış günlük bar ister. Yeni kotlar ve fiyat verisi eksik semboller raporda ayrı görünür. Listenin tamamı birden çok turda taranır. Mevcut BIST ve ABD listeleri geçmiş endeks üyeliğini, delist verisini ve geçmişteki tüm şirketleri kapsamaz.
 
 ## Teknik deneyler
 

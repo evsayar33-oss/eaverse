@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .delivery import gh
@@ -32,13 +33,20 @@ def repository():
 
 
 def release():
-    return json.loads(gh("api", f"repos/{repository()}/releases/tags/{TAG}"))
+    endpoint = f"repos/{repository()}/releases/tags/{TAG}"
+    for attempt in range(4):
+        try:
+            return json.loads(gh("api", endpoint, "-H", "Cache-Control: no-cache"))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            error = getattr(exc, "stderr", "") or ""
+            if "(HTTP 404)" in error or attempt == 3:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def assets():
-    release_id = release()["id"]
-    items = json.loads(gh("api", f"repos/{repository()}/releases/{release_id}/assets?per_page=100"))
-    return sorted((item for item in items if NAME.fullmatch(item["name"])),
+    # The tagged release response already includes its uploaded assets.
+    return sorted((item for item in release()["assets"] if item.get("state", "uploaded") == "uploaded" and NAME.fullmatch(item["name"])),
                   key=lambda item: item["name"], reverse=True)
 
 
@@ -99,10 +107,22 @@ def save(path):
         if items and NAME.fullmatch(items[0]["name"]).group(2) == sha:
             return
         asset_path = archive.rename(archive.with_name(f"state-{generation:020}-{sha}.sqlite.gz"))
-        gh("release", "upload", TAG, str(asset_path), "-R", repository())
-    newest = assets()
-    if not newest or newest[0]["name"] != asset_path.name:
-        raise RuntimeError("checkpoint upload was not confirmed")
+        for attempt in range(4):
+            try:
+                gh("release", "upload", TAG, str(asset_path), "-R", repository())
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                upload_error = exc
+            else:
+                upload_error = None
+            newest = assets()
+            if newest and newest[0]["name"] == asset_path.name:
+                break
+            if attempt == 3:
+                raise RuntimeError("checkpoint upload was not confirmed") from upload_error
+            time.sleep(2 ** attempt)
+    reported_digest = newest[0].get("digest")
+    if reported_digest and reported_digest != f"sha256:{sha}":
+        raise ValueError("uploaded checkpoint digest mismatch")
     for old in newest[3:]:
         gh("api", "--method", "DELETE", f"repos/{repository()}/releases/assets/{old['id']}")
 

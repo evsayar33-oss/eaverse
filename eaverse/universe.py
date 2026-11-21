@@ -6,7 +6,8 @@ import csv
 import io
 import json
 import re
-from datetime import date, timedelta
+from datetime import timedelta
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 
@@ -15,6 +16,12 @@ SEC = "https://www.sec.gov/files/company_tickers_exchange.json"
 KAP = "https://www.kap.org.tr/tr/bist-sirketler"
 COINBASE = "https://api.exchange.coinbase.com/products"
 LIMITS = {"US": 40, "BIST": 32, "CRYPTO": 24}
+REFERENCE = Path(__file__).parent / "reference_data"
+
+
+def bundled_us():
+    captured, *symbols = (REFERENCE / "us-exchange-symbols.txt").read_text().splitlines()
+    return captured, set(symbols)
 
 
 def read_url(url):
@@ -93,10 +100,17 @@ def refresh(db, market, today):
             if row:
                 db.execute("UPDATE listings SET checked=? WHERE market=?", (today.isoformat(), market.name))
     catalog = set(json.loads(row["symbols"])) if row else set()
+    if not catalog and market.name == "US":
+        captured, catalog = bundled_us()
+        return sorted(catalog.union(market.symbols)), {
+            "source": SEC, "listing_date": captured, "listed": len(catalog), "listing_error": error,
+            "coverage_mode": "bundled_snapshot",
+        }
     return sorted(catalog.union(market.symbols)), {
         "source": row["source"] if row else None,
         "listing_date": row["asof"] if row else None,
         "listed": len(catalog), "listing_error": error,
+        "coverage_mode": "cached" if error and catalog else "live" if catalog else "seed_symbols",
     }
 
 
