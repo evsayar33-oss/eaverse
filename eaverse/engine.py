@@ -6,12 +6,14 @@ import argparse
 import json
 import os
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from . import data, research
+from . import data, events, research, universe
 
 
 SCHEMA = """
@@ -31,6 +33,31 @@ CREATE TABLE IF NOT EXISTS paper (
 CREATE UNIQUE INDEX IF NOT EXISTS one_paper_per_asset ON paper(asset) WHERE status = 'active';
 CREATE TABLE IF NOT EXISTS health (
     asset TEXT PRIMARY KEY, failures INTEGER NOT NULL, episode INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS listings (
+    market TEXT PRIMARY KEY, source TEXT NOT NULL, asof TEXT NOT NULL, checked TEXT NOT NULL, symbols TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS asset_rotation (
+    market TEXT NOT NULL, symbol TEXT NOT NULL, visited TEXT NOT NULL, due TEXT NOT NULL, failures INTEGER NOT NULL,
+    error TEXT, PRIMARY KEY(market,symbol)
+);
+CREATE TABLE IF NOT EXISTS event_catalog (
+    family TEXT PRIMARY KEY, checked TEXT NOT NULL, asof TEXT NOT NULL, dates TEXT NOT NULL, error TEXT
+);
+CREATE TABLE IF NOT EXISTS event_calendar_versions (
+    sha TEXT PRIMARY KEY, dates TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS event_trials (
+    version TEXT NOT NULL, asset TEXT NOT NULL, id TEXT NOT NULL, snapshot TEXT NOT NULL,
+    asof TEXT NOT NULL, calendar TEXT NOT NULL, summary TEXT NOT NULL, PRIMARY KEY(version,asset,id)
+);
+CREATE TABLE IF NOT EXISTS synthesis_parents (
+    asset TEXT NOT NULL, id TEXT NOT NULL, spec TEXT NOT NULL, score REAL NOT NULL,
+    PRIMARY KEY(asset,id)
+);
+CREATE INDEX IF NOT EXISTS synthesis_score ON synthesis_parents(score DESC);
+CREATE TABLE IF NOT EXISTS history_archives (
+    sha TEXT PRIMARY KEY, url TEXT NOT NULL, records INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS outbox (
     id TEXT PRIMARY KEY, message TEXT NOT NULL, receipt TEXT
@@ -92,7 +119,8 @@ def advance_paper(db, asset, bars):
     if date(observed.index[0]) != row["start"]:
         raise ValueError("PAPER opening date is missing")
     stop = observed.index[min(research.PAPER_BARS, len(observed) - 1)]
-    desired = research.target(anchored, research.features(anchored), json.loads(row["spec"]), 365)
+    spec = json.loads(row["spec"])
+    desired = research.target(anchored, research.features(anchored, [spec]), spec, 365)
     metrics, returns, benchmark = research.paper_metrics(
         anchored, desired, row["start"], stop, row["cost"], row["sequence"],
     ) if len(observed) > 11 else (None, None, None)
@@ -131,7 +159,17 @@ def discover(db, asset, market, bars, now, budget):
     for record in records:
         n, wins = learning.get(record["family"], (0, 0))
         learning[record["family"]] = (n + 1, wins + int(json.loads(record["discovered"])["pass"]))
-    selected = research.choose(asset, {record["id"] for record in records}, learning, budget)
+    own = list(db.execute(
+        "SELECT spec FROM synthesis_parents WHERE asset=? ORDER BY score DESC LIMIT 4", (asset,)))
+    peers = list(db.execute(
+        "SELECT spec FROM synthesis_parents WHERE asset<>? AND asset LIKE ? ORDER BY score DESC LIMIT 4",
+        (asset, market.name + ":%")))
+    # Only discovery-fold successes can seed changes or cross-asset transfer.
+    out_of_market = list(db.execute(
+        "SELECT spec FROM synthesis_parents WHERE asset NOT LIKE ? ORDER BY score DESC LIMIT 2",
+        (market.name + ":%",)))
+    parents = [json.loads(spec) for spec in dict.fromkeys(row["spec"] for row in own + peers + out_of_market)]
+    selected = research.expand(asset, {record["id"] for record in records}, learning, parents, budget)
     snapshot = data.fingerprint(bars)
     code = os.getenv("GITHUB_SHA", "local")
     asof = date(bars.index[-1])
@@ -139,7 +177,7 @@ def discover(db, asset, market, bars, now, budget):
     discovery_end = len(bars) - research.MIN_VALIDATION_BARS - 4
     validation_index = bars.index[-research.MIN_VALIDATION_BARS:]
     discovery_index = bars.index[200:discovery_end]
-    signals = research.features(bars)
+    signals = research.features(bars, [spec for _, spec in selected])
     candidates = []
     for key, spec in selected:
         desired = research.target(bars, signals, spec, periods)
@@ -150,6 +188,11 @@ def discover(db, asset, market, bars, now, budget):
                     snapshot, asof, code, research.canonical(research.POLICY), research.canonical(report)))
         if report["pass"]:
             candidates.append((key, spec, report))
+            db.execute("INSERT OR IGNORE INTO synthesis_parents VALUES (?,?,?,?)",
+                       (asset, key, research.canonical(spec), report["net"]))
+    db.execute("""DELETE FROM synthesis_parents WHERE asset=? AND id NOT IN (
+        SELECT id FROM synthesis_parents WHERE asset=? ORDER BY score DESC,id LIMIT 20
+    )""", (asset, asset))
     # One candidate per batch/asset is chosen by discovery evidence before
     # validation. Reuse of historical data makes this a screen. PAPER is prospective.
     nominee = None
@@ -160,7 +203,8 @@ def discover(db, asset, market, bars, now, budget):
         db.execute("UPDATE attempts SET validated=? WHERE version=? AND asset=? AND id=?",
                    (research.canonical(validation), research.VERSION, asset, key))
         nominee = {"id": key, "spec": spec, "validation": validation}
-        if market.source == "coinbase" and validation["pass"]:
+        active_count = db.execute("SELECT count(*) FROM paper WHERE status='active'").fetchone()[0]
+        if market.source == "coinbase" and validation["pass"] and active_count < 12:
             start = (now.date() + timedelta(days=1)).isoformat()
             anchored = bars.iloc[-400:]
             origin = {"id": key, "source": market.source, "data_sha256": snapshot, "code": code,
@@ -176,29 +220,103 @@ def discover(db, asset, market, bars, now, budget):
             "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof, "paper_eligible": market.source == "coinbase"}
 
 
-def run(db, market_names, budget):
+def fetch_bars(market, symbol, now):
+    try:
+        return data.load(market, symbol, now), None
+    except Exception as exc:
+        # The provider can raise transport and parsing errors from several libraries.
+        # Strategy/evidence errors are handled separately and never hidden here.
+        return None, f"{type(exc).__name__}: {exc}"[:300]
+
+
+def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report=None):
     now = datetime.now(UTC)
+    deadline = time.monotonic() + 14 * 60
     with db:
         update_pending_paper_policy(db, now)
-    report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}}
-    for market in data.MARKETS:
-        if market.name not in market_names:
-            continue
-        for symbol in market.symbols:
+        event_dates, coverage = events.refresh(db, now.date()) if event_budget else ({}, {})
+        if event_budget:
+            db.execute("INSERT OR IGNORE INTO event_calendar_versions VALUES (?,?)",
+                       (research.digest(event_dates), research.canonical(event_dates)))
+            missing = [name for name, item in coverage.items() if not item["usable"]]
+            health(db, "macro-calendar", "missing " + ", ".join(missing) if missing else None)
+        queues = []
+        market_reports = {}
+        for market in data.MARKETS:
+            if market.name not in market_names:
+                continue
+            symbols, listing = universe.refresh(db, market, now.date())
+            listing_asof = listing["listing_date"]
+            stale_listing = listing_asof is None or listing_asof < (now.date() - timedelta(days=3)).isoformat()
+            health(db, f"listings:{market.name}", "live listing catalog unavailable or stale" if stale_listing else None)
+            selected = universe.queue(db, market, symbols, now.date(), asset_limit or universe.LIMITS[market.name])
+            queues.append((market, iter(selected)))
+            market_reports[market.name] = {**listing, "universe": len(symbols), "scheduled": len(selected),
+                                          "screened": 0, "unavailable": 0}
+    report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}, "markets": market_reports,
+              "event_sources": coverage}
+    daily_records = []
+    # Interleave providers and give active PAPER rows the first slots on their market.
+    scheduled = []
+    while queues:
+        next_round = []
+        for market, queue in queues:
+            symbol = next(queue, None)
+            if symbol:
+                scheduled.append((market, symbol))
+                next_round.append((market, queue))
+        queues = next_round
+    for batch_start in range(0, len(scheduled), 6):
+        if time.monotonic() > deadline:
+            report["deferred_for_runtime"] = len(scheduled) - batch_start
+            break
+        batch = scheduled[batch_start:batch_start+6]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            prices = list(executor.map(lambda item: fetch_bars(*item, now), batch))
+        for (market, symbol), (bars, failure) in zip(batch, prices):
             asset = f"{market.name}:{symbol}"
-            try:
-                bars = data.load(market, symbol, now)
+            tracked = db.execute("SELECT 1 FROM paper WHERE asset=? AND status='active'", (asset,)).fetchone()
+            if failure is None:
+                try:
+                    with db:
+                        paper = advance_paper(db, asset, bars)
+                        result = discover(db, asset, market, bars, now, budget)
+                        if event_budget:
+                            result["events"], daily = events.evaluate(
+                                db, asset, bars, event_dates, result["asof"], result["snapshot_sha256"],
+                                market.cost_bps, event_budget,
+                                result["candidate"]["spec"] if result["candidate"] else None,
+                                365 if market.calendar is None else 252,
+                            )
+                            daily_records.extend(daily)
+                        report["assets"][asset] = {**result, "paper": paper}
+                        universe.record(db, market.name, symbol, now, None)
+                        if tracked or symbol in market.symbols:
+                            health(db, asset, None)
+                    market_reports[market.name]["screened"] += 1
+                except ValueError as exc:
+                    # A frozen PAPER data revision or incompatible engine is actionable.
+                    if not tracked:
+                        raise
+                    failure = f"{type(exc).__name__}: {exc}"[:300]
+            if failure:
+                status = ("insufficient_history" if any(message in failure for message in
+                          ("fewer than 600", "insufficient Coinbase history")) else "unavailable")
+                report["assets"][asset] = {"error": failure, "coverage": status}
                 with db:
-                    paper = advance_paper(db, asset, bars)
-                    report["assets"][asset] = {**discover(db, asset, market, bars, now, budget), "paper": paper}
-                    health(db, asset, None)
-            except (OSError, ValueError, KeyError, IndexError) as exc:
-                error = f"{type(exc).__name__}: {exc}"[:300]
-                with db:
-                    health(db, asset, error)
-                report["assets"][asset] = {"error": error}
-            print(asset, "data error" if "error" in report["assets"][asset] else "screened", flush=True)
+                    universe.record(db, market.name, symbol, now, status)
+                    if tracked or symbol in market.symbols:
+                        health(db, asset, failure)
+                market_reports[market.name]["unavailable"] += 1
+            print(asset, "coverage error" if failure else "screened", flush=True)
+    with db:
+        for name, outcome in market_reports.items():
+            market_error = "no symbols could be screened" if not outcome["screened"] and outcome["unavailable"] else None
+            health(db, f"market:{name}", market_error)
+    if daily_report:
+        events.write_daily(daily_report, daily_records)
     report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+    report["total_event_trials"] = db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0]
     report["paper"] = [
         dict(row) for row in db.execute("SELECT sequence,asset,start,cursor,status FROM paper ORDER BY sequence")
     ]
@@ -212,13 +330,18 @@ def main():
     parser.add_argument("--report", default="runtime/report.json")
     parser.add_argument("--market", action="append", choices=[market.name for market in data.MARKETS])
     parser.add_argument("--budget", type=int, choices=range(1, 129), default=24, metavar="1..128")
+    parser.add_argument("--event-budget", type=int, choices=range(25), default=6, metavar="0..24")
+    parser.add_argument("--assets-per-market", type=int, choices=range(1, 101), metavar="1..100")
+    parser.add_argument("--daily-report", default="runtime/event-daily.jsonl")
     args = parser.parse_args()
     with connect(args.db) as db:
-        report = run(db, args.market or [market.name for market in data.MARKETS], args.budget)
+        report = run(db, args.market or [market.name for market in data.MARKETS], args.budget,
+                     args.event_budget, args.assets_per_market, args.daily_report)
     path = Path(args.report)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    print(f"{report['total_trials']} recorded hypotheses; {report['pending_notifications']} pending alerts")
+    print(f"{report['total_trials']} technical trials, {report['total_event_trials']} event trials; "
+          f"{report['pending_notifications']} pending alerts")
 
 
 if __name__ == "__main__":

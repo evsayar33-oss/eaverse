@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: [".github/bootstrap-research"]
   schedule:
-    - cron: '43 4,18,22 * * *'
+    - cron: '43 2,6,10,14,18,22 * * *'
   workflow_dispatch:
     inputs:
       bootstrap:
@@ -30,7 +30,7 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
-      EAVERSE_BOOTSTRAP: ${{ (github.event_name == 'push' || inputs.bootstrap) && 'true' || 'false' }}
+      EAVERSE_BOOTSTRAP: ${{ inputs.bootstrap && 'true' || 'false' }}
       EAVERSE_EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +44,10 @@ jobs:
         run: python -m eaverse.checkpoint restore
       - name: Discover, validate and advance PAPER simulations
         run: python -m eaverse.engine
+      - name: Archive completed research groups
+        id: archival
+        continue-on-error: true
+        run: python -m eaverse.archive
       - name: Commit results before notification
         run: python -m eaverse.checkpoint save
       - name: Publish research summary
@@ -51,7 +55,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: research-summary-${{ github.run_id }}
-          path: runtime/report.json
+          path: |
+            runtime/report.json
+            runtime/event-daily.jsonl
           retention-days: 7
       - name: Deliver actionable notifications
         id: delivery
@@ -62,3 +68,6 @@ jobs:
       - name: Save notification receipts
         if: always() && steps.delivery.outcome != 'skipped'
         run: python -m eaverse.checkpoint save
+      - name: Surface archival failure after saving state
+        if: always() && steps.archival.outcome == 'failure'
+        run: exit 1

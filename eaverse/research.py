@@ -6,6 +6,8 @@ import hashlib
 import itertools
 import json
 import math
+import random
+from functools import lru_cache
 from collections import defaultdict, deque
 
 import numpy as np
@@ -25,6 +27,13 @@ FEATURES = {
     "atr": (10, 20, 40),
     "bollinger": (15, 20, 40),
 }
+EXTENDED = {"macd": (8, 12, 20), "stoch_recovery": (9, 14, 21),
+            "adx": (10, 14, 21), "obv": (10, 30, 60), "vwma": (20, 50, 100),
+            "mean_reversion": (10, 20, 50)}
+LEVELS = {"rsi_recovery": (25, 30, 35, 40), "rsi_trend": (45, 50, 55, 60),
+          "volume": (1.05, 1.15, 1.35, 1.5), "atr": (0.03, 0.05, 0.07),
+          "bollinger": (0.75, 1.0, 1.5, 2.0), "adx": (18, 22, 27, 32),
+          "stoch_recovery": (15, 20, 25, 35), "mean_reversion": (0.75, 1.0, 1.5, 2.0)}
 STRATEGIC_FEATURES = set(FEATURES) - {"volume", "low_vol", "atr"}
 MIN_VALIDATION_BARS = 180
 PAPER_BARS = 90
@@ -69,13 +78,19 @@ def catalog():
                                    "sizing": sizing, "confirmation": confirmation}
 
 
+@lru_cache(maxsize=1)
+def base_catalog():
+    return tuple((tuple(name for name, _ in spec["rules"]), digest(spec), spec) for spec in catalog())
+
+
 def choose(asset: str, prior: set, family_results: dict, budget: int):
     families = defaultdict(list)
-    for spec in catalog():
-        family = tuple(name for name, _ in spec["rules"])
-        key = digest(spec)
+    for family, key, spec in base_catalog():
         if key not in prior:
-            families[family].append((digest([asset, key]), key, spec))
+            families[family].append((key, spec))
+    rng = random.Random(digest([asset, len(prior)]))
+    for group in families.values():
+        rng.shuffle(group)
     # A smoothed estimate guides some of the allocation. Under-explored families
     # stay in rotation and only discovery folds can inform the estimate.
     def priority(family):
@@ -87,14 +102,14 @@ def choose(asset: str, prior: set, family_results: dict, budget: int):
     for size in (1, 2, 3):
         group = sorted((family for family in families if len(family) == size), key=priority)
         if group:
-            groups[size] = deque(deque(sorted(families[family])) for family in group)
+            groups[size] = deque(deque(families[family]) for family in group)
     selected = []
     active_sizes = deque(groups)
     while active_sizes and len(selected) < budget:
         size = active_sizes.popleft()
         queues = groups[size]
         queue = queues.popleft()
-        _, key, spec = queue.popleft()
+        key, spec = queue.popleft()
         selected.append((key, spec))
         if queue:
             queues.append(queue)
@@ -103,51 +118,120 @@ def choose(asset: str, prior: set, family_results: dict, budget: int):
     return selected
 
 
+def expand(asset, prior, family_results, parents, budget):
+    """Allocate trials to known families, new settings and transferred winners."""
+    fixed = choose(asset, prior, family_results, (budget + 2) // 3)
+    chosen = dict(fixed)
+    seen = prior | set(chosen)
+    rng = random.Random(digest([asset, len(prior), "settings-v1"]))
+    options = {**FEATURES, **EXTENDED}
+    for turn in range(max(24, budget * 6)):
+        if len(chosen) >= budget:
+            break
+        if parents and turn % 2 == 0:
+            spec = json.loads(canonical(parents[(turn // 2) % len(parents)]))
+            slot = rng.randrange(len(spec["rules"]))
+            name, old = spec["rules"][slot]
+            nearby = round(old * rng.choice((0.60, 0.80, 0.90, 1.10, 1.20, 1.40)))
+            spec["rules"][slot] = [name, min(100 if name in {"macd", "adx", "low_vol"} else 200, max(5, nearby))]
+        else:
+            size = (turn // 2) % 3 + 1
+            names = sorted(rng.sample(sorted(options), size))
+            if not (STRATEGIC_FEATURES | set(EXTENDED)).intersection(names):
+                continue
+            spec = {"rules": [[name, rng.choice(options[name])] for name in names],
+                    "vote": rng.choice(tuple(range(max(1, size - 1), size + 1))),
+                    "sizing": rng.choice(("full", "vol_target")), "confirmation": rng.choice((1, 2, 3))}
+            name = rng.choice(names)
+        if name in LEVELS and rng.random() < 0.75:
+            spec.setdefault("levels", {})[name] = rng.choice(LEVELS[name])
+        identity = digest(spec)
+        if identity not in seen:
+            seen.add(identity)
+            chosen[identity] = spec
+    return list(chosen.items())
+
+
+def signal_key(spec, name, window):
+    level = spec.get("levels", {}).get(name)
+    return (name, window) if level is None else (name, window, level)
+
+
 def ranking_key(item):
     key, spec, metrics = item
     return (-metrics["net"], metrics["drawdown"], key, len(spec["rules"]))
 
 
-def features(bars: pd.DataFrame):
+def features(bars: pd.DataFrame, specs=None):
     close = bars.close
     change = close.diff()
     returns = close.pct_change()
-    tr = pd.concat([bars.high - bars.low, (bars.high - close.shift()).abs(), (bars.low - close.shift()).abs()], axis=1).max(axis=1)
+    tr = pd.concat([bars.high - bars.low, (bars.high - close.shift()).abs(),
+                    (bars.low - close.shift()).abs()], axis=1).max(axis=1)
+    requested = (
+        {(name, n) for name, windows in FEATURES.items() for n in windows}
+        if specs is None else {signal_key(spec, name, n) for spec in specs for name, n in spec["rules"]}
+    )
     result = {}
-    for family, windows in FEATURES.items():
-        for n in windows:
-            mean = close.rolling(n).mean()
-            if family == "sma":
-                flag = close > mean
-            elif family == "ema":
-                flag = close > close.ewm(span=n, min_periods=n, adjust=False).mean()
-            elif family == "momentum":
-                flag = close > close.shift(n)
-            elif family == "breakout":
-                flag = close > bars.high.shift().rolling(n).max()
-            elif family.startswith("rsi"):
-                gain = change.clip(lower=0).rolling(n).mean()
-                loss = -change.clip(upper=0).rolling(n).mean()
-                rsi = 100 * gain / (gain + loss)
-                flag = (rsi > 50) if family == "rsi_trend" else ((rsi > 35) & (rsi.shift() < 45))
-            elif family == "volume":
-                flag = bars.volume > 1.15 * bars.volume.shift().rolling(n).mean()
-            elif family == "low_vol":
-                vol = returns.rolling(n).std()
-                flag = vol <= vol.rolling(100).median()
-            elif family == "atr":
-                flag = (tr.rolling(n).mean() / close) < 0.05
-            else:
-                flag = close > mean + close.rolling(n).std()
-            result[family, n] = flag.fillna(False).astype(float)
+    for key in requested:
+        family, n, *levels = key
+        level = levels[0] if levels else None
+        if family == "sma":
+            flag = close > close.rolling(n).mean()
+        elif family == "ema":
+            flag = close > close.ewm(span=n, min_periods=n, adjust=False).mean()
+        elif family == "momentum":
+            flag = close > close.shift(n)
+        elif family == "breakout":
+            flag = close > bars.high.shift().rolling(n).max()
+        elif family.startswith("rsi"):
+            gain = change.clip(lower=0).rolling(n).mean()
+            loss = -change.clip(upper=0).rolling(n).mean()
+            rsi = 100 * gain / (gain + loss)
+            floor = level or 35
+            flag = (rsi > (level or 50)) if family == "rsi_trend" else ((rsi > floor) & (rsi.shift() < floor + 10))
+        elif family == "volume":
+            flag = bars.volume > (level or 1.15) * bars.volume.shift().rolling(n).mean()
+        elif family == "low_vol":
+            vol = returns.rolling(n).std()
+            flag = vol <= vol.rolling(100).median()
+        elif family == "atr":
+            flag = (tr.rolling(n).mean() / close) < (level or 0.05)
+        elif family == "bollinger":
+            flag = close > close.rolling(n).mean() + (level or 1.0) * close.rolling(n).std()
+        elif family == "macd":
+            macd = close.ewm(span=n, min_periods=n, adjust=False).mean() - close.ewm(
+                span=2*n, min_periods=2*n, adjust=False).mean()
+            flag = macd > macd.ewm(span=max(3, n//2), adjust=False).mean()
+        elif family == "stoch_recovery":
+            low = bars.low.rolling(n).min()
+            high = bars.high.rolling(n).max()
+            position = 100 * (close - low) / (high - low)
+            threshold = level or 20
+            flag = (position >= threshold) & (position.shift() < threshold)
+        elif family == "adx":
+            up, down = bars.high.diff(), -bars.low.diff()
+            plus = up.where((up > down) & (up > 0), 0).ewm(alpha=1/n, min_periods=n, adjust=False).mean()
+            minus = down.where((down > up) & (down > 0), 0).ewm(alpha=1/n, min_periods=n, adjust=False).mean()
+            dx = 100 * (plus - minus).abs() / (plus + minus).where(plus + minus > 0)
+            flag = (plus > minus) & (dx.ewm(alpha=1/n, min_periods=n, adjust=False).mean() > (level or 22))
+        elif family == "obv":
+            flag = (np.sign(change) * bars.volume).rolling(n).sum() > 0
+        elif family == "vwma":
+            flag = close > (close * bars.volume).rolling(n).sum() / bars.volume.rolling(n).sum()
+        elif family == "mean_reversion":
+            flag = close < close.rolling(n).mean() - (level or 1.0) * close.rolling(n).std()
+        else:
+            raise ValueError(f"unknown feature {family}")
+        result[key] = flag.fillna(False).astype(float)
     return result
 
 
 def target(bars, signals, spec, periods):
-    votes = sum(signals[tuple(rule)] for rule in spec["rules"])
+    votes = sum(signals[signal_key(spec, *rule)] for rule in spec["rules"])
     result = (votes >= spec["vote"]).astype(float)
-    if spec["confirmation"] == 2:
-        result = result.rolling(2).min().fillna(0)
+    if spec["confirmation"] > 1:
+        result = result.rolling(spec["confirmation"]).min().fillna(0)
     if spec["sizing"] == "vol_target":
         vol = bars.close.pct_change().rolling(30).std() * math.sqrt(periods)
         scale = (0.25 / vol.where(vol > 0)).clip(upper=1).fillna(0)
