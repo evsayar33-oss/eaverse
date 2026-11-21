@@ -1,0 +1,3 @@
+[submodule "quant_superlab"]
+    path = reference/quant_superlab
+    url = https://github.com/evsayar33-oss/quant_superlab.git
