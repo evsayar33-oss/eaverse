@@ -114,7 +114,8 @@ def render_paper(item):
         }], hide_index=True)
         st.caption("Net değerler modeldeki varsayılan kapatma maliyetini içerir. Sharpe ve Sortino en az 20 getiri barıyla hesaplanır.")
         if progress.get("median_quote_volume_30") is not None:
-            st.caption(f"Gözlenen son en çok 30 mumun medyan hacim tahmini: {progress['median_quote_volume_30']:,.0f} USD.")
+            currency = "TRY" if item["asset"].startswith("BIST:") else "USD"
+            st.caption(f"Son en çok 30 mumun medyan hacim tahmini: {progress['median_quote_volume_30']:,.0f} {currency}.")
 
 
 def render_panel(payload):

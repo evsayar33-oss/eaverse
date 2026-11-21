@@ -321,12 +321,12 @@ def hac_p_value(excess, lag):
     return 0.5 * math.erfc(z / math.sqrt(2))
 
 
-def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True):
+def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True, periods=365):
     returns, trades, _ = simulation(bars, desired, start, stop, 2 * cost_bps, delay=PAPER_EXECUTION_DELAY)
     benchmark, _, _ = simulation(bars, pd.Series(1.0, index=bars.index), start, stop, 2 * cost_bps)
     measurements = stats(returns, trades)
     measurements.update(metrics.describe(
-        returns, interval_exposure(desired, start, stop, PAPER_EXECUTION_DELAY), 365,
+        returns, interval_exposure(desired, start, stop, PAPER_EXECUTION_DELAY), periods,
     ))
     benchmark_net = stats(benchmark, 0)["net"]
     measurements["benchmark_net"] = benchmark_net

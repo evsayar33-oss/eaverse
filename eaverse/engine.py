@@ -17,6 +17,8 @@ from . import data, events, research, universe
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS idea_documents(repo TEXT,sha TEXT,PRIMARY KEY(repo,sha));
+CREATE TABLE IF NOT EXISTS source_ideas(repo TEXT,sha TEXT,id TEXT,spec TEXT,PRIMARY KEY(repo,sha,id));
 CREATE TABLE IF NOT EXISTS attempts (
     version TEXT NOT NULL, asset TEXT NOT NULL, id TEXT NOT NULL, family TEXT NOT NULL,
     spec TEXT NOT NULL, source TEXT NOT NULL, snapshot TEXT NOT NULL, asof TEXT NOT NULL,
@@ -123,12 +125,13 @@ def advance_paper(db, asset, bars):
         raise ValueError("PAPER opening date is missing")
     stop = observed.index[min(research.PAPER_BARS, len(observed) - 1)]
     spec = json.loads(row["spec"])
-    desired = research.target(anchored, research.features(anchored, [spec]), spec, 365)
+    periods = json.loads(row["origin"]).get("periods", 365)
+    desired = research.target(anchored, research.features(anchored, [spec]), spec, periods)
     days = len(observed.loc[:stop]) - 1
     if days:
         metrics, returns, benchmark = research.paper_metrics(
             anchored, desired, row["start"], stop, row["cost"], row["sequence"],
-            final=days >= research.PAPER_BARS,
+            final=days >= research.PAPER_BARS, periods=periods,
         )
         observed_opens = observed.loc[:stop].index[1:]
         progress = {
@@ -187,7 +190,10 @@ def discover(db, asset, market, bars, now, budget):
         "SELECT spec FROM synthesis_parents WHERE asset NOT LIKE ? ORDER BY score DESC LIMIT 2",
         (market.name + ":%",)))
     parents = [json.loads(spec) for spec in dict.fromkeys(row["spec"] for row in own + peers + out_of_market)]
-    selected = research.expand(asset, {record["id"] for record in records}, learning, parents, budget)
+    from . import ideas
+    sourced = ideas.pending(db, asset, budget // 4)
+    tried = {record["id"] for record in records} | {key for key, _ in sourced}
+    selected = sourced + research.expand(asset, tried, learning, parents, budget - len(sourced))
     snapshot = data.fingerprint(bars)
     code = os.getenv("GITHUB_SHA", "local")
     asof = date(bars.index[-1])
@@ -223,10 +229,14 @@ def discover(db, asset, market, bars, now, budget):
                    (research.canonical(validation), research.VERSION, asset, key))
         nominee = {"id": key, "spec": spec, "validation": validation}
         active_count = db.execute("SELECT count(*) FROM paper WHERE status='active'").fetchone()[0]
-        if market.source == "coinbase" and validation["pass"] and active_count < 12:
+        if validation["pass"] and active_count < 12:
             start = (now.date() + timedelta(days=1)).isoformat()
+            if market.calendar:
+                import exchange_calendars as xcals
+                start = date(xcals.get_calendar(market.calendar).date_to_session(start, direction="next"))
             anchored = bars.iloc[-400:]
             origin = {"id": key, "source": market.source, "data_sha256": snapshot, "code": code,
+                      "periods": periods, "calendar": market.calendar,
                       "data_start": date(bars.index[0]), "data_end": asof,
                       "history_cost_bps": 2 * market.cost_bps,
                       "discovery": discovery_report, "validation": validation}
@@ -238,7 +248,7 @@ def discover(db, asset, market, bars, now, budget):
                  research.canonical(origin)),
             )
     return {"new_trials": len(selected), "total_trials": len(records) + len(selected), "candidate": nominee,
-            "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof, "paper_eligible": market.source == "coinbase"}
+            "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof, "paper_eligible": True}
 
 
 def fetch_bars(market, symbol, now):
@@ -255,6 +265,9 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     deadline = time.monotonic() + 14 * 60
     with db:
         update_pending_paper_policy(db, now)
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            from . import ideas
+            ideas.refresh(db)
         event_dates, coverage = events.refresh(db, now.date()) if event_budget else ({}, {})
         calendar_cutoffs = {}
         if event_budget:

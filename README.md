@@ -1,6 +1,8 @@
 # Eaverse
 
-Eaverse birden çok piyasada teknik strateji ve takvim hipotezlerini araştırır. Uygun kripto adaylarını güncel fiyatlarla PAPER portföyde sınar. Tüm hesaplar sanaldır.
+Eaverse kripto, ABD ve BIST teknik adaylarını güncel fiyatlarla PAPER portföyde sınar. Hisse adayları ilk uygun sonraki borsa seansında başlar. Hisse getirileri sağlayıcının düzeltilmiş fiyatlarına dayanır. Geçmiş fiyat revizyonları ileri testi durdurur.
+
+Araştırma işi tanımlı kamuya açık depoların README sürümlerini kontrol eder. Desteklenen gösterge adlarından tekli ve ikili deneyler üretir. Kaynak belge kimliğini saklar ve varlık başına deney bütçesinin dörtte birini bu kuyruğa ayırır.
 
 ## Varlık evreni ve sürekli tarama
 
