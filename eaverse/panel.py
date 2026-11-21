@@ -49,6 +49,14 @@ def projection(db_path, report, run_url):
                         "new_trials": assets.get(row[0], {}).get("new_trials", 0)}
                        for row in db.execute("SELECT asset,COUNT(*) FROM attempts GROUP BY asset ORDER BY asset")],
         }
+        research["direction_count"] = db.execute("SELECT count(*) FROM direction_checks").fetchone()[0]
+        comparisons = []
+        for asset, key, raw in db.execute("SELECT asset,id,result FROM direction_checks ORDER BY rowid DESC LIMIT 40"):
+            check = json.loads(raw)
+            comparisons.append({"Varlık": asset, "Strateji": key[:12], "Aktarılan varlık": check.get("source_asset"),
+                                **{mode: round(100 * check[mode]["validation"]["net"], 2)
+                                   for mode in ("long", "short", "long_short")}})
+        research["comparisons"] = comparisons
         for row in db.execute("""
             SELECT paper.*, paper_progress.metrics
             FROM paper LEFT JOIN paper_progress USING(sequence)
@@ -63,6 +71,8 @@ def projection(db_path, report, run_url):
                 "result": json.loads(row["result"]) if row["result"] else None,
                 "data_paused": row["status"] == "active" and bool(assets.get(row["asset"], {}).get("error")),
             })
+            longer = db.execute("SELECT result FROM extended_checks WHERE sequence=?", (row["sequence"],)).fetchone()
+            entry["extended"] = json.loads(longer[0]) if longer else None
             entries.append(entry)
     return {
         "schema": 1, "published_at": report["time"], "run_url": run_url,

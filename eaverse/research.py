@@ -241,6 +241,42 @@ def target(bars, signals, spec, periods):
     return result
 
 
+def direction_check(bars, long, spec, signals, discovery, validation, cost_bps, periods):
+    """Exploratory short exposure from failed votes, including daily borrow and exit fees."""
+    votes = sum(signals[signal_key(spec, *rule)] for rule in spec["rules"])
+    bearish = (len(spec["rules"]) - votes >= spec["vote"]) & (votes < spec["vote"])
+    size = bearish.astype(float).rolling(spec["confirmation"]).min().fillna(0)
+    if spec["sizing"] == "vol_target":
+        vol = bars.close.pct_change().rolling(30).std() * math.sqrt(periods)
+        size *= ((0.25 / vol.where(vol > 0)).clip(upper=1).fillna(0) * 4).round() / 4
+    result = {"borrow_apr_assumption": 0.05, "execution_delay_bars": 2}
+    for label, target_weights in (("long", long), ("short", -size), ("long_short", long - size)):
+        weights = target_weights.shift(2).fillna(0).to_numpy()
+        stages = {}
+        for name, dates in (("discovery", discovery), ("validation", validation)):
+            first, last = bars.index.get_indexer([dates[0], dates[-1]])
+            w = weights[first:last]
+            opens = bars.open.to_numpy()[first:last+1]
+            returns = opens[1:] / opens[:-1] - 1
+            elapsed = np.diff(dates.to_numpy()) / np.timedelta64(1, "D")
+            cost = 2 * cost_bps / 10000
+            gross = 1 + w * returns - np.maximum(-w, 0) * 0.05 * elapsed / 365
+            # Stress short positions against the daily high as well as the next open.
+            highs = bars.high.to_numpy()[first:last]
+            insolvent = np.any(1 + w[w < 0] * (highs[w < 0] / opens[:-1][w < 0] - 1) <= 0)
+            net = -1.0
+            if not insolvent and np.all(gross > 0):
+                drift = w * (1 + returns) / gross
+                factors = gross * (1 - cost * abs(w - np.r_[0., drift[:-1]]))
+                factors[-1] *= 1 - cost * abs(drift[-1])
+                if np.all(factors > 0):
+                    net = float(np.prod(factors) - 1)
+            stages[name] = {"net": net, "start": dates[0].date().isoformat(),
+                            "end": dates[-1].date().isoformat()}
+        result[label] = stages
+    return result
+
+
 def interval_exposure(desired, start, end, delay):
     return desired.shift(delay).loc[start:end].iloc[:-1].fillna(0)
 

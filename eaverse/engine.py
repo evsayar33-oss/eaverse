@@ -17,6 +17,8 @@ from . import data, events, research, universe
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS extended_checks(sequence INTEGER PRIMARY KEY, result TEXT);
+CREATE TABLE IF NOT EXISTS direction_checks(asset TEXT, id TEXT, snapshot TEXT, result TEXT, PRIMARY KEY(asset,id));
 CREATE TABLE IF NOT EXISTS idea_documents(repo TEXT,sha TEXT,PRIMARY KEY(repo,sha));
 CREATE TABLE IF NOT EXISTS source_ideas(repo TEXT,sha TEXT,id TEXT,spec TEXT,PRIMARY KEY(repo,sha,id));
 CREATE TABLE IF NOT EXISTS attempts (
@@ -107,6 +109,61 @@ def update_pending_paper_policy(db, now):
     )
 
 
+def recheck_pending(db, asset, market, bars, now):
+    """Replace a revised pre-opening proposal only after testing its frozen rules again."""
+    row = db.execute("SELECT * FROM paper WHERE asset=? AND status='active' AND cursor IS NULL AND start>?",
+                     (asset, now.date().isoformat())).fetchone()
+    if not row or row["version"] != research.VERSION or row["policy"] != research.canonical(research.POLICY):
+        return
+    window = bars.loc[row["anchor"]:row["cutoff"]]
+    if data.fingerprint(window) == row["digest"]:
+        return
+    origin = json.loads(row["origin"])
+    history = bars.loc[:row["cutoff"]]
+    if len(history) < 600 or date(history.index[-1]) != row["cutoff"]:
+        return
+    spec = json.loads(row["spec"])
+    periods = origin.get("periods", 365)
+    weights = research.target(history, research.features(history, [spec]), spec, periods)
+    revised = {}
+    for label in ("discovery", "validation"):
+        block = origin.get(label, {})
+        if not block.get("start") or not block.get("end"):
+            return
+        dates = history.loc[block["start"]:block["end"]].index
+        if len(dates) < 180 or date(dates[0]) != block["start"] or date(dates[-1]) != block["end"]:
+            return
+        revised[label] = research.history_metrics(history, weights, dates, row["cost"], periods)
+    db.execute("UPDATE paper SET status='revised_before_start' WHERE sequence=?", (row["sequence"],))
+    if all(block["pass"] for block in revised.values()):
+        anchor = history.iloc[-400:]
+        origin.update(revised, replaces=row["sequence"], data_start=date(history.index[0]),
+                      data_sha256=data.fingerprint(history), code=os.getenv("GITHUB_SHA", "local"))
+        db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
+                      VALUES(?,?,?,?,?,?,?,?,?,?,'active')""",
+                   (asset,row["spec"],row["cost"],row["start"],date(anchor.index[0]),row["cutoff"],
+                    data.fingerprint(anchor),row["version"],row["policy"],research.canonical(origin)))
+
+
+def extend_active_history(db, asset, bars, market):
+    row = db.execute("""SELECT * FROM paper WHERE asset=? AND status='active'
+                        AND sequence NOT IN (SELECT sequence FROM extended_checks)""", (asset,)).fetchone()
+    if not row:
+        return
+    origin = json.loads(row["origin"])
+    history = bars.loc[:row["cutoff"]]
+    if not len(history) or date(history.index[0]) >= origin.get("data_start", ""):
+        return
+    spec = json.loads(row["spec"])
+    periods = origin.get("periods", 365)
+    desired = research.target(history, research.features(history, [spec]), spec, periods)
+    dates = history.index[200:-research.MIN_VALIDATION_BARS-4]
+    if len(dates) < 180:
+        return
+    result = research.history_metrics(history, desired, dates, market.cost_bps, periods)
+    db.execute("INSERT INTO extended_checks VALUES (?,?)", (row["sequence"], research.canonical(result)))
+
+
 def advance_paper(db, asset, bars):
     row = db.execute("SELECT * FROM paper WHERE asset = ? AND status = 'active'", (asset,)).fetchone()
     if row is None:
@@ -192,6 +249,18 @@ def discover(db, asset, market, bars, now, budget):
     parents = [json.loads(spec) for spec in dict.fromkeys(row["spec"] for row in own + peers + out_of_market)]
     from . import ideas
     sourced = ideas.pending(db, asset, budget // 4)
+    transfer_sources = {}
+    for source, key, raw in db.execute("""
+        SELECT p.asset,p.id,p.spec FROM synthesis_parents p
+        WHERE p.asset<>? AND p.asset LIKE ? AND NOT EXISTS (
+          SELECT 1 FROM attempts a WHERE a.asset=? AND a.id=p.id AND a.version=?)
+        ORDER BY p.score DESC,p.asset,p.id
+    """, (asset, market.name + ":%", asset, research.VERSION)):
+        if len(transfer_sources) >= budget // 4:
+            break
+        if key not in transfer_sources and key not in {k for k,_ in sourced}:
+            transfer_sources[key] = source
+            sourced.append((key,json.loads(raw)))
     tried = {record["id"] for record in records} | {key for key, _ in sourced}
     selected = sourced + research.expand(asset, tried, learning, parents, budget - len(sourced))
     snapshot = data.fingerprint(bars)
@@ -206,6 +275,10 @@ def discover(db, asset, market, bars, now, budget):
     for key, spec in selected:
         desired = research.target(bars, signals, spec, periods)
         report = research.history_metrics(bars, desired, discovery_index, market.cost_bps)
+        directions = research.direction_check(bars, desired, spec, signals, discovery_index, validation_index, market.cost_bps, periods)
+        directions["source_asset"] = transfer_sources.get(key)
+        db.execute("INSERT OR REPLACE INTO direction_checks VALUES (?,?,?,?)",
+                   (asset,key,snapshot,research.canonical(directions)))
         family = ",".join(name for name, _ in spec["rules"])
         db.execute("INSERT INTO attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                    (research.VERSION, asset, key, family, research.canonical(spec), market.source,
@@ -316,7 +389,9 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             if failure is None:
                 try:
                     with db:
+                        recheck_pending(db, asset, market, bars, now)
                         paper = advance_paper(db, asset, bars)
+                        extend_active_history(db, asset, bars, market)
                         result = discover(db, asset, market, bars, now, budget)
                         if event_budget:
                             result["events"], daily = events.evaluate(

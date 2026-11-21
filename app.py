@@ -37,6 +37,7 @@ def status(item):
     return {
         "active": "PAPER izleniyor",
         "verified_paper": "PAPER doğrulandı",
+        "revised_before_start": "Başlangıç öncesi fiyat geçmişi değişti",
         "paper_gate_failed": "PAPER eşiği geçilemedi",
     }.get(item["status"], item["status"])
 
@@ -185,6 +186,11 @@ def render_panel(payload):
                          .rename(columns={"asset": "Varlık", "total_trials": "Toplam teknik deneme",
                                           "new_trials": "Son turda yeni"}), hide_index=True)
 
+    if research and research.get("comparisons"):
+        with st.expander(f"Üç yönlü karşılaştırmalar · {research['direction_count']} varlık-strateji çifti"):
+            st.caption("Son 40 karşılaştırmanın doğrulama dönemi net getirileri (%). Short için yıllık %5 "
+                       "ödünç maliyeti varsayılır. Ödünç bulunabilirliği ve fiili fonlama doğrulanmamıştır.")
+            st.dataframe(research["comparisons"], hide_index=True)
     if not entries:
         st.info("Henüz PAPER izlemeye alınmış strateji yok.")
         return
@@ -211,6 +217,10 @@ def render_panel(payload):
         render_paper(item)
     with backtest:
         origin = item["origin"]
+        if item.get("extended"):
+            longer = item["extended"]
+            st.caption(f"Ek uzun dönem backtesti · {longer['start']} – {longer['end']} · "
+                       f"{duration(longer['start'], longer['end'])} · Net {pct(longer['net'], signed=True)}")
         rows = history_table(origin)
         if rows:
             st.dataframe(rows, hide_index=True)

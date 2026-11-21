@@ -21,6 +21,18 @@ def market_frame(size=800):
 
 
 class ResearchTests(unittest.TestCase):
+    def test_directional_returns_use_next_eligible_open(self):
+        bars = market_frame(6)
+        bars["open"] = [100., 200., 200., 180., 180., 180.]
+        bars["high"] = bars.open
+        spec = {"rules": [["ema", 5]], "vote": 1, "sizing": "full", "confirmation": 1}
+        signal = pd.Series(False, index=bars.index)
+        result = research.direction_check(bars, signal.astype(float), spec, {("ema", 5): signal},
+                                          bars.index[:4], bars.index[3:], 0, 365)
+        for mode in ("short", "long_short"):
+            self.assertAlmostEqual(result[mode]["discovery"]["net"], .1 - .05 / 365)
+        self.assertEqual(result["long"]["discovery"]["net"], 0)
+
     def test_catalog_has_unique_strategy_combinations(self):
         specs = list(research.catalog())
         self.assertEqual(len(specs), 34_636)

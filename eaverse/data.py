@@ -58,7 +58,7 @@ def candle_request(symbol: str, start: datetime, end: datetime) -> list:
 def coinbase(symbol: str, now: datetime) -> pd.DataFrame:
     # Allow the provider ten minutes to publish the preceding UTC daily bar.
     end = (now - timedelta(minutes=10)).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = end - timedelta(days=1260)
+    start = end - timedelta(days=2192)
     records = {}
     cursor = start
     while cursor < end:
@@ -76,6 +76,10 @@ def coinbase(symbol: str, now: datetime) -> pd.DataFrame:
     if len(bars) < 600:
         raise ValueError("insufficient Coinbase history")
     expected = pd.date_range(bars.index[0], end.date() - timedelta(days=1), freq="D")
+    gaps = expected.difference(bars.index)
+    if len(gaps) and (expected > gaps[-1]).sum() >= 600:
+        expected = expected[expected > gaps[-1]]
+        bars = bars.loc[expected[0]:]
     return validate(bars, expected)
 
 
@@ -84,7 +88,7 @@ def equities(symbol: str, market: Market, now: datetime) -> pd.DataFrame:
     import yfinance as yf
 
     calendar = xcals.get_calendar(market.calendar)
-    start = (now - timedelta(days=1260)).date()
+    start = (now - timedelta(days=2192)).date()
     today = now.date()
     sessions = calendar.sessions_in_range(pd.Timestamp(start), pd.Timestamp(today))
     completed = sessions[(calendar.schedule.loc[sessions, "close"] <= pd.Timestamp(now - timedelta(minutes=90))).to_numpy()]
