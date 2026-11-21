@@ -21,6 +21,19 @@ def market_frame(size=800):
 
 
 class ResearchTests(unittest.TestCase):
+    def test_adjusted_ohlc_roundoff_is_accepted_without_changing_prices(self):
+        bars = market_frame()
+        bars.loc[bars.index[0], "high"] = bars.loc[bars.index[0], "open"] * (1 - 2e-16)
+        bars.loc[bars.index[1], "low"] = bars.loc[bars.index[1], "close"] * (1 + 2e-16)
+        bars.loc[bars.index[0], "high"] = bars.loc[bars.index[0], ["open", "close", "low"]].max() * (1 - 2e-16)
+        bars.loc[bars.index[1], "low"] = bars.loc[bars.index[1], ["open", "close", "high"]].min() * (1 + 2e-16)
+        original = bars.copy()
+        pd.testing.assert_frame_equal(data.validate(bars, bars.index), original.astype(float))
+        bad = bars.copy()
+        bad.loc[bad.index[0], "high"] *= 0.99
+        with self.assertRaisesRegex(ValueError, "inconsistent candle high"):
+            data.validate(bad, bad.index)
+
     def test_directional_returns_use_next_eligible_open(self):
         bars = market_frame(6)
         bars["open"] = [100., 200., 200., 180., 180., 180.]

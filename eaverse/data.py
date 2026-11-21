@@ -123,9 +123,12 @@ def validate(bars: pd.DataFrame, expected: pd.DatetimeIndex) -> pd.DataFrame:
     bars = bars.astype(float)
     if not np.isfinite(bars.to_numpy()).all() or (bars[COLUMNS[:4]] <= 0).any().any():
         raise ValueError("non-finite or non-positive OHLC")
-    if (bars.high < bars[["open", "close", "low"]].max(axis=1)).any():
+    # Yahoo's adjusted OHLC can differ at the last binary float bit when
+    # close equals a daily extreme. Keep the original values and fingerprint.
+    tolerance = 1e-12
+    if (bars.high < bars[["open", "close", "low"]].max(axis=1) * (1 - tolerance)).any():
         raise ValueError("inconsistent candle high")
-    if (bars.low > bars[["open", "close", "high"]].min(axis=1)).any() or (bars.volume < 0).any():
+    if (bars.low > bars[["open", "close", "high"]].min(axis=1) * (1 + tolerance)).any() or (bars.volume < 0).any():
         raise ValueError("inconsistent candle low or volume")
     return bars
 
