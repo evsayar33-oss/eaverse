@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import checkpoint
+from . import checkpoint, research as research_engine
 from .delivery import gh
 
 
@@ -56,6 +56,8 @@ def projection(db_path, report, run_url):
         """):
             entry = {key: row[key] for key in ("sequence", "asset", "status", "start", "cursor", "cutoff", "cost")}
             entry.update({
+                "execution_model": ({"max_leverage": 1, "direction": "long_only", "bar": "1d"}
+                                    if row["version"] == research_engine.VERSION else None),
                 "spec": json.loads(row["spec"]), "policy": json.loads(row["policy"]),
                 "origin": json.loads(row["origin"]), "progress": json.loads(row["metrics"]) if row["metrics"] else None,
                 "result": json.loads(row["result"]) if row["result"] else None,

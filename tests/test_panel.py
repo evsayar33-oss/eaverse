@@ -57,7 +57,9 @@ class PanelTests(unittest.TestCase):
                        VALUES (?,?,?,?,?,?,?,?,?,?,'active')""",
                     ("CRYPTO:BTC-USD", research.canonical(spec), 35, start, anchor, cutoff,
                      data.fingerprint(bars.iloc[:400]), research.VERSION, research.canonical(research.POLICY),
-                     json.dumps({"id": "test", "discovery": {"net": 0.12}, "validation": {"net": 0.20}})),
+                     json.dumps({"id": "test", "discovery": {"net": 0.12,
+                                 "start": "2024-01-01", "end": "2025-01-01"},
+                                 "validation": {"net": 0.20}})),
                 )
                 engine.advance_paper(db, "CRYPTO:BTC-USD", bars.iloc[:403])
             snapshot = panel.projection(
@@ -76,6 +78,11 @@ class PanelTests(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual([tab.label for tab in app.tabs], ["Güncel PAPER", "İzleme öncesi backtest"])
             self.assertIn("+12,00%", app.dataframe[1].value["Keşif net"].values)
+            history = app.dataframe[3].value
+            self.assertIn("366 takvim günü", history.iloc[0]["Süre"])
+            self.assertEqual(history.iloc[1]["Süre"], "Kayıt yok")
+            self.assertEqual(paper["execution_model"]["max_leverage"], 1)
+            self.assertTrue(any("Kaldıraç: en fazla 1×" in item.value for item in app.info))
             self.assertIn("Net getiri", [item.label for item in app.metric])
             self.assertEqual(snapshot["research"]["total_trials"], 0)
             self.assertEqual(app.metric[0].value, "0")

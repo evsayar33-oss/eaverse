@@ -48,6 +48,9 @@ def history_table(origin):
         if block:
             rows.append({
                 "Dönem": label,
+                "Başlangıç": block.get("start") or "Kayıt yok",
+                "Bitiş": block.get("end") or "Kayıt yok",
+                "Süre": duration(block.get("start"), block.get("end")),
                 "Net getiri": pct(block.get("net"), signed=True),
                 "Al-tut": pct(block.get("benchmark_net"), signed=True),
                 "Maks. düşüş": pct(block.get("drawdown")),
@@ -55,6 +58,27 @@ def history_table(origin):
                 "Kârlı bölüm": block.get("profitable_folds"),
             })
     return rows
+
+
+def duration(start, end):
+    if not start or not end:
+        return "Kayıt yok"
+    days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days
+    if days < 0:
+        return "Henüz başlamadı"
+    return f"{days} takvim günü (≈ {days / 30.4375:.1f} ay / {days / 365.25:.2f} yıl)"
+
+
+def render_model(item):
+    model = item.get("execution_model")
+    if not model:
+        st.caption("Bu kayıtta doğrulanmış kaldıraç modeli bilgisi yok.")
+        return
+    st.info("Kaldıraç: en fazla 1× (borçlanma yok). Yalnızca alış yönü; sermayenin %0–100'ü kullanılır. "
+            "Mum aralığı: günlük. Bu model hem backtest hem PAPER için geçerlidir.")
+    sizing = item["spec"].get("sizing")
+    st.caption("Pozisyon büyüklüğü: " + ("oynaklığa göre %0–100 arasında ayarlanır."
+               if sizing == "vol_target" else "sinyal varsa %100, yoksa nakit."))
 
 
 def history_details(origin):
@@ -68,6 +92,8 @@ def history_details(origin):
                 "Bölüm": i,
                 "Başlangıç": row.get("start") or "—",
                 "Bitiş": row.get("end") or "—",
+                "Süre": duration(row.get("start"), row.get("end")),
+                "Sonuç": "Kârlı" if row.get("net", 0) > 0 else "Kârlı değil",
                 "Net getiri": pct(row.get("net"), signed=True),
                 "Al-tut": pct(row.get("benchmark_net"), signed=True),
                 "Maks. düşüş": pct(row.get("drawdown")),
@@ -91,6 +117,10 @@ def render_paper(item):
     cols[3].metric("Kapanan işlem", paper.get("trades") if paper.get("trades") is not None else "—")
     asof = progress.get("latest_open") or item["cursor"]
     st.caption(f"Sanal başlangıç {item['start']} · Son ölçüm {asof or '—'} · Bar {count if count is not None else '—'}/{target or '—'}")
+    st.caption(f"Ölçülen PAPER süresi: {duration(item['start'], asof)}")
+    if count is not None and target is not None:
+        st.caption(f"Hedefe kalan: {max(0, target - count)} getiri barı. "
+                   "Hisselerde seans günleri, kriptoda takvim günleri sayılır; eksik veri süreyi uzatabilir.")
     if item["data_paused"]:
         st.warning("Son turda veri veya PAPER sürekliliği doğrulanamadı. Son doğrulanmış ölçüm gösteriliyor.")
     if progress.get("curve"):
@@ -175,6 +205,7 @@ def render_panel(payload):
                          format_func=lambda i: f"{subset[i]['asset']} · PAPER #{subset[i]['sequence']}")
     item = subset[focus]
     st.subheader(f"{item['asset']} · {status(item)}")
+    render_model(item)
     paper, backtest = st.tabs(["Güncel PAPER", "İzleme öncesi backtest"])
     with paper:
         render_paper(item)
@@ -184,6 +215,9 @@ def render_panel(payload):
         if rows:
             st.dataframe(rows, hide_index=True)
             st.caption("Getiriler maliyet sonrasıdır. Keşif ve yakın dönem pencereleri ayrı ölçümlerdir. "
+                       "Getiriler yıllık getiri değil, belirtilen test bölümlerinin bileşik sonucudur. "
+                       "Süre başlangıç ile bitiş arasındaki takvim farkıdır; ay ve yıl yaklaşık değerlerdir. "
+                       "Alt dönemler ayrı test edilir; toplam kesintisiz bir portföy eğrisi değildir. "
                        "Düşüş, en zayıf alt dönemdeki maksimum düşüştür.")
             history_details(origin)
         else:
