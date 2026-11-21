@@ -23,6 +23,12 @@ ARCHIVES = {
     "FOMC": ("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
              r"/pressreleases/monetary(\d{8})a\.htm", "%Y%m%d"),
 }
+ALFRED_RELEASES = {
+    "US_CPI": 10, "US_PAYROLLS": 50, "US_PPI": 46, "US_GDP": 53,
+    "US_PCE_INCOME": 54, "US_JOLTS": 192, "US_RETAIL_SALES": 9,
+}
+VINTAGE = r'data-release-date="(\d{4}-\d{2}-\d{2})"'
+FAMILIES = set(ARCHIVES) | set(ALFRED_RELEASES)
 CALENDAR = tuple(f"WEEKDAY_{n}" for n in range(7)) + ("MONTH_FIRST_3", "MONTH_LAST_3")
 STUDY_VERSION = "calendar-1"
 MIN_EVENTS = 3
@@ -51,17 +57,23 @@ def refresh(db, today):
     event_dates, coverage = {}, {}
 
     def download(family):
-        url, pattern, fmt = ARCHIVES[family]
-        try:
-            days = parse_dates(read_url(url), pattern, fmt, today)
-            recent = [day for day in days if day >= f"{today.year - 3}-01-01"]
-            if len(recent) < (15 if family == "FOMC" else 24):
-                raise ValueError("archive coverage insufficient")
-            return days, None
-        except (OSError, ValueError) as exc:
-            return None, type(exc).__name__
+        sources = [ARCHIVES[family]] if family in ARCHIVES else []
+        if family in ALFRED_RELEASES:
+            sources.append((f"https://alfred.stlouisfed.org/release?rid={ALFRED_RELEASES[family]}",
+                            VINTAGE, "%Y-%m-%d"))
+        failure = "archive coverage insufficient"
+        for url, pattern, fmt in sources:
+            try:
+                days = parse_dates(read_url(url), pattern, fmt, today)
+                recent = [day for day in days if day >= f"{today.year - 3}-01-01"]
+                if len(recent) >= (15 if family == "FOMC" else 24):
+                    return days, None
+            except (OSError, ValueError) as exc:
+                failure = type(exc).__name__
+        return None, failure
 
-    pending = [family for family in ARCHIVES if family not in rows or rows[family]["checked"] != today.isoformat()]
+    pending = [family for family in sorted(FAMILIES)
+               if family not in rows or rows[family]["checked"] != today.isoformat()]
     with ThreadPoolExecutor(max_workers=4) as workers:
         for family, (days, error) in zip(pending, workers.map(download, pending)):
             if days:
@@ -73,22 +85,15 @@ def refresh(db, today):
 
     for row in db.execute("SELECT * FROM event_catalog"):
         dates = json.loads(row["dates"])
-        current = (today - date.fromisoformat(row["asof"])).days <= 3
-        if current:
-            event_dates[row["family"]] = dates
-        coverage[row["family"]] = {"dates": len(dates), "fetched": row["asof"], "usable": current, "error": row["error"]}
+        event_dates[row["family"]] = dates
+        coverage[row["family"]] = {"dates": len(dates), "fetched": row["asof"],
+                                   "usable": True, "error": row["error"]}
     frozen = json.loads((REFERENCE / "us-macro-dates.json").read_text())
-    for family in ARCHIVES:
-        if family not in coverage or not coverage[family]["usable"]:
-            # A static archive is safe for historical windows ending on or before
-            # its last checked date. Older archived runs remain reproducible.
-            captured = frozen["asof"]
-            if (today - date.fromisoformat(captured)).days <= 3:
-                event_dates[family] = frozen["families"][family]
-                coverage[family] = {"usable": True, "dates": len(event_dates[family]),
-                                    "fetched": captured, "error": "bundled_snapshot"}
-            elif family not in coverage:
-                coverage[family] = {"usable": False, "dates": 0}
+    for family in sorted(FAMILIES):
+        if family not in coverage:
+            event_dates[family] = frozen["families"][family]
+            coverage[family] = {"usable": True, "dates": len(event_dates[family]),
+                                "fetched": frozen["asof"], "error": "bundled_snapshot"}
     return event_dates, coverage
 
 
@@ -119,15 +124,15 @@ def designs(available, baselines):
         for base in baselines:
             for mode in ("only", "avoid"):
                 yield ([(family, offset)], "single", base, mode)
-    for first, second in itertools.combinations(sorted({name for name, _ in available if name in ARCHIVES}), 2):
+    for first, second in itertools.combinations(sorted({name for name, _ in available if name in FAMILIES}), 2):
         for combine in ("and", "or"):
             for base in baselines:
                 yield ([(first, 1), (second, 1)], combine, base, "only")
-    for first, second in itertools.combinations(sorted({name for name, _ in available if name in ARCHIVES}), 2):
+    for first, second in itertools.combinations(sorted({name for name, _ in available if name in FAMILIES}), 2):
         for lag in (2, 3):
             for base in baselines:
                 yield ([(first, r) for r in range(1, lag + 1)] + [(second, 1)], "recent_overlap", base, "only")
-    for family in sorted({name for name, _ in available if name in ARCHIVES}):
+    for family in sorted({name for name, _ in available if name in FAMILIES}):
         for weekday in range(7):
             yield ([(family, 1), (f"WEEKDAY_{weekday}", 1)], "and", "sma_50", "only")
 
@@ -141,24 +146,30 @@ def select_mask(mask_map, conditions, combine):
     return np.logical_and.reduce(parts)
 
 
-def evaluate(db, asset, bars, dates, asof, snapshot, cost_bps, budget, technical=None, periods=252):
+def evaluate(db, asset, bars, dates, asof, snapshot, cost_bps, budget, technical=None, periods=252, cutoffs=None):
     rules = masks(bars.index, dates)
     prior = {r["id"] for r in db.execute("SELECT id FROM event_trials WHERE asset=? AND version=?",
                                        (asset, STUDY_VERSION))}
     eligible = {}
-    season = f"{bars.index[-1].year}-Q{bars.index[-1].quarter}"
+    cutoffs = cutoffs or {}
     baselines = dict(BASELINES)
     if technical:
         baselines["discovery_finalist"] = technical
-    boundary = len(bars) - research.MIN_VALIDATION_BARS
     for design in designs(rules, baselines):
+        dates_available = [cutoffs[family] for family, _ in design[0] if family in cutoffs]
+        end = bars.index.searchsorted(pd.Timestamp(min(dates_available)), side="right") if dates_available else len(bars)
+        if end < 600:
+            continue
+        boundary = end - research.MIN_VALIDATION_BARS
+        latest = bars.index[end - 1]
+        season = f"{latest.year}-Q{latest.quarter}"
         identity = research.digest([season, design, baselines[design[2]]])
         if identity in prior:
             continue
         treatment = select_mask(rules, design[0], design[1])
-        if treatment[200:boundary].sum() >= MIN_EVENTS and treatment[boundary:-1].sum() >= MIN_EVENTS:
-            category = design[1] if design[0][0][0] in ARCHIVES else "calendar"
-            eligible.setdefault(category, []).append((identity, design, treatment))
+        if treatment[200:boundary].sum() >= MIN_EVENTS and treatment[boundary:end - 1].sum() >= MIN_EVENTS:
+            category = design[1] if design[0][0][0] in FAMILIES else "calendar"
+            eligible.setdefault(category, []).append((identity, design, treatment, end, season))
     # Interleave stand-alone macro dates, calendar effects and joint events.
     groups = [iter(sorted(items, key=lambda item: research.digest([asset, item[0]])))
               for _, items in sorted(eligible.items())]
@@ -179,13 +190,14 @@ def evaluate(db, asset, bars, dates, asof, snapshot, cost_bps, budget, technical
     }
     daily = []
     summaries = []
-    for identity, design, treatment in ordered:
+    for identity, design, treatment, end, season in ordered:
         conditions, combine, base, mode = design
+        boundary = end - research.MIN_VALIDATION_BARS
         base_exposure = baseline[base].shift(2).fillna(0)
         target = base_exposure * (treatment if mode == "only" else ~treatment)
         summary = {"design": design, "baseline_spec": baselines[base], "quarter": season,
-                   "discovery": {}, "recent": {}}
-        for label, start, stop in (("discovery", 200, boundary - 1), ("recent", boundary, len(bars) - 1)):
+                   "study_end": bars.index[end - 1].date().isoformat(), "discovery": {}, "recent": {}}
+        for label, start, stop in (("discovery", 200, boundary - 1), ("recent", boundary, end - 1)):
             options = (bars.index[start], bars.index[stop], 2 * cost_bps)
             tested, trades, _ = research.simulation(bars, target, *options, delay=0)
             reference, ref_trades, _ = research.simulation(bars, base_exposure, *options, delay=0)

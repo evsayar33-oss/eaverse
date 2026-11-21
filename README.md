@@ -21,7 +21,7 @@ Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Canlı ABD li
 
 ## Haber ve takvim deneyleri
 
-BLS’nin yayımladığı ABD TÜFE, ÜFE ve istihdam açıklama tarihleri ile Fed'in FOMC karar tarihleri kullanılır. Her piyasanın ilk uygun işlem açılışından başlayarak takip eden birinci, ikinci ve üçüncü işlem günleri ayrı sınanır. Veri, duyuru günü açılışının sonradan bilinen haberle etkilenmesini önlemek için bu açılışı testin dışında bırakır.
+ABD TÜFE, ÜFE, istihdam, GSYH, kişisel gelir ve harcamalar (PCE), JOLTS ve perakende satış açıklamaları ile FOMC kararları taranır. BLS ve Fed arşivleri ile St. Louis Fed'in ALFRED yayımlanma tarihleri kullanılır. Kaynak kesintisi uzarsa olay testi bilinen arşiv tarihinde biter. Her piyasanın ilk uygun işlem açılışından başlayarak takip eden birinci, ikinci ve üçüncü işlem günleri ayrı sınanır. Veri, duyuru günü açılışının sonradan bilinen haberle etkilenmesini önlemek için bu açılışı testin dışında bırakır.
 
 Aşağıdaki hipotezler her varlık için dönüşümlü sınanır:
 

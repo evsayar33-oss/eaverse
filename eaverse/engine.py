@@ -235,11 +235,14 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     with db:
         update_pending_paper_policy(db, now)
         event_dates, coverage = events.refresh(db, now.date()) if event_budget else ({}, {})
+        calendar_cutoffs = {}
         if event_budget:
             db.execute("INSERT OR IGNORE INTO event_calendar_versions VALUES (?,?)",
                        (research.digest(event_dates), research.canonical(event_dates)))
-            missing = [name for name, item in coverage.items() if not item["usable"]]
-            health(db, "macro-calendar", "missing " + ", ".join(missing) if missing else None)
+            calendar_cutoffs = {name: item["fetched"] for name, item in coverage.items()}
+            stale_calendars = [name for name, limit in calendar_cutoffs.items()
+                               if limit < (now.date() - timedelta(days=3)).isoformat()]
+            health(db, "macro-calendar", "stale " + ", ".join(stale_calendars) if stale_calendars else None)
         queues = []
         market_reports = {}
         for market in data.MARKETS:
@@ -286,7 +289,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                                 db, asset, bars, event_dates, result["asof"], result["snapshot_sha256"],
                                 market.cost_bps, event_budget,
                                 result["candidate"]["spec"] if result["candidate"] else None,
-                                365 if market.calendar is None else 252,
+                                365 if market.calendar is None else 252, calendar_cutoffs,
                             )
                             daily_records.extend(daily)
                         report["assets"][asset] = {**result, "paper": paper}

@@ -80,6 +80,19 @@ class ExpansionTests(unittest.TestCase):
             self.assertAlmostEqual(np.prod([1 + row["net"] for row in rows]) - 1, item["recent"]["net"])
         self.assertFalse({row["id"] for row in first["trials"]}.intersection(row["id"] for row in second["trials"]))
 
+    def test_alfred_dates_and_stale_calendar_cap(self):
+        raw = '<a data-release-date="2026-11-10">CPI</a><a data-release-date="2026-12-10">future</a>'
+        self.assertEqual(events.parse_dates(raw, events.VINTAGE, "%Y-%m-%d", date(2026, 11, 21)), ["2026-11-10"])
+        bars = market_frame(750)
+        known_until = bars.index[650].date().isoformat()
+        releases = [day.date().isoformat() for day in bars.index[::15] if day.date().isoformat() <= known_until]
+        with engine.connect(":memory:") as db:
+            result, _ = events.evaluate(db, "asset", bars, {"US_CPI": releases}, "x", "hash", 35, 24,
+                                        cutoffs={"US_CPI": known_until})
+        affected = [trial for trial in result["trials"] if ("US_CPI" in {a for a, _ in trial["design"][0]})]
+        self.assertTrue(affected)
+        self.assertTrue(all(trial["study_end"] == known_until for trial in affected))
+
     def test_mutation_settings_and_legacy_signal_are_causal(self):
         bars = market_frame()
         parent = {"rules": [["rsi_trend", 14]], "sizing": "full", "confirmation": 1, "vote": 1}

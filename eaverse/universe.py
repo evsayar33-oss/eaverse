@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 
 NASDAQ = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
+NASDAQ_SCREEN = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000"
 SEC = "https://www.sec.gov/files/company_tickers_exchange.json"
 KAP = "https://www.kap.org.tr/tr/bist-sirketler"
 COINBASE = "https://api.exchange.coinbase.com/products"
@@ -39,6 +40,15 @@ def nasdaq_symbols(raw):
         if row.get("Nasdaq Traded") == "Y" and row.get("Test Issue") == "N"
         and re.fullmatch(r"[A-Z]{1,5}(?:\.[A-Z])?", row.get("Symbol") or "")
         and (row.get("ETF") == "Y" or not excluded.search(row.get("Security Name") or ""))
+    }
+
+
+def nasdaq_screen_symbols(raw):
+    rows = json.loads(raw)["data"]["table"]["rows"]
+    return {
+        row["symbol"].replace(".", "-")
+        for row in rows
+        if re.fullmatch(r"[A-Z]{1,5}(?:[.-][A-Z])?", row.get("symbol") or "")
     }
 
 
@@ -71,13 +81,14 @@ def coinbase_symbols(raw):
 
 def fetch(name):
     if name == "US":
-        try:
-            symbols = sec_symbols(read_url(SEC))
-            if len(symbols) >= 1000:
-                return SEC, symbols
-        except (OSError, ValueError):
-            pass
-        return NASDAQ, nasdaq_symbols(read_url(NASDAQ))
+        for url, parse in ((SEC, sec_symbols), (NASDAQ_SCREEN, nasdaq_screen_symbols), (NASDAQ, nasdaq_symbols)):
+            try:
+                symbols = parse(read_url(url))
+                if len(symbols) >= 1000:
+                    return url, symbols
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        raise ValueError("SEC and Nasdaq listing feeds unavailable")
     if name == "BIST":
         return KAP, kap_symbols(read_url(KAP))
     return COINBASE, coinbase_symbols(read_url(COINBASE))
@@ -110,7 +121,7 @@ def refresh(db, market, today):
         "source": row["source"] if row else None,
         "listing_date": row["asof"] if row else None,
         "listed": len(catalog), "listing_error": error,
-        "coverage_mode": "cached" if error and catalog else "live" if catalog else "seed_symbols",
+        "coverage_mode": ("live" if row["asof"] == today.isoformat() else "cached") if catalog else "seed_symbols",
     }
 
 
