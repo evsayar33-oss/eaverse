@@ -68,6 +68,10 @@ jobs:
           name: checkpoint-recovery-${{ github.run_id }}
           path: runtime/research.sqlite
           retention-days: 2
+      - name: Publish PAPER dashboard snapshot
+        id: paper_panel
+        continue-on-error: true
+        run: python -m eaverse.panel
       - name: Deliver actionable notifications
         id: delivery
         env:
@@ -77,6 +81,6 @@ jobs:
       - name: Save notification receipts
         if: always() && steps.delivery.outcome != 'skipped'
         run: python -m eaverse.checkpoint save
-      - name: Surface archival failure after saving state
-        if: always() && steps.archival.outcome == 'failure'
+      - name: Surface publication failure after saving state
+        if: always() && (steps.archival.outcome == 'failure' || steps.paper_panel.outcome == 'failure')
         run: exit 1

@@ -44,3 +44,11 @@ python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 python -m eaverse.engine --market CRYPTO --assets-per-market 5 --budget 6 --event-budget 4
 ```
+
+## Streamlit PAPER paneli
+
+Streamlit Community Cloud'da depo olarak `evsayar33-oss/eaverse`, dal olarak `main` ve giriş dosyası olarak `app.py` seçilir. Python 3.12 ile yerelde `streamlit run app.py` çalışır.
+
+Panel, araştırma işi kalıcı kaydı doğruladıktan sonra yayımlanan küçük bir JSON dosyasını okur. Panel için Streamlit secret'ı veya kişisel GitHub token'ı gerekmez. Açık panel, yayımlanan kaydı beş dakikada bir kontrol eder. Ölçümler araştırma turlarında ilerler. Telegram için GitHub Actions'ta yalnızca `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` gerekir. `github.token` GitHub tarafından iş çalışırken verilir.
+
+Aktif ve tamamlanan adaylar ayrı görüntülenebilir. PAPER sekmesi son tamamlanmış getiri barına kadar maliyet sonrası kümülatif getiri, al-tut ve nakit kıyası, düşüş ve işlem istatistiklerini gösterir. Yeterli seri oluştuğunda Sharpe, Sortino ve oynaklık görünür. İşlem kazanma oranı, beklenti ve kâr faktöründe tam kapanan pozisyon dönemleri sayılır. Geçmiş test sekmesi adayın izlemeye alınmadan önceki keşif ve yakın dönem testlerinin dondurulmuş değerlerini gösterir. Eski kayıtların saklamadığı alanlarda veya hesaplama için gözlem yetersizse değer boş kalır.

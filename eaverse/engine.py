@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS paper (
     origin TEXT NOT NULL, status TEXT NOT NULL, result TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_paper_per_asset ON paper(asset) WHERE status = 'active';
+CREATE TABLE IF NOT EXISTS paper_progress (
+    sequence INTEGER PRIMARY KEY, metrics TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS health (
     asset TEXT PRIMARY KEY, failures INTEGER NOT NULL, episode INTEGER NOT NULL
 );
@@ -121,12 +124,27 @@ def advance_paper(db, asset, bars):
     stop = observed.index[min(research.PAPER_BARS, len(observed) - 1)]
     spec = json.loads(row["spec"])
     desired = research.target(anchored, research.features(anchored, [spec]), spec, 365)
-    metrics, returns, benchmark = research.paper_metrics(
-        anchored, desired, row["start"], stop, row["cost"], row["sequence"],
-    ) if len(observed) > 11 else (None, None, None)
+    days = len(observed.loc[:stop]) - 1
+    if days:
+        metrics, returns, benchmark = research.paper_metrics(
+            anchored, desired, row["start"], stop, row["cost"], row["sequence"],
+            final=days >= research.PAPER_BARS,
+        )
+        observed_opens = observed.loc[:stop].index[1:]
+        progress = {
+            "bars": days, "latest_open": date(stop), "stats": metrics,
+            "curve": [{"date": row["start"], "strategy": 0.0, "benchmark": 0.0}] + [
+                {"date": date(day), "strategy": float(strategy), "benchmark": float(reference)}
+                for day, strategy, reference in zip(
+                    observed_opens, (1 + returns).cumprod() - 1, (1 + benchmark).cumprod() - 1, strict=True
+                )
+            ],
+            "median_quote_volume_30": float((observed.close * observed.volume).tail(30).median()),
+        }
+        db.execute("INSERT OR REPLACE INTO paper_progress VALUES (?,?)",
+                   (row["sequence"], research.canonical(progress)))
     db.execute("UPDATE paper SET cursor=?, history_digest=? WHERE sequence=?",
                (date(stop), data.fingerprint(anchored.loc[:stop]), row["sequence"]))
-    days = len(observed.loc[:stop]) - 1
     if days < research.PAPER_BARS:
         return {"status": "active", "sequence": row["sequence"], "bars": days}
     status = "verified_paper" if metrics["pass"] else "paper_gate_failed"
@@ -199,7 +217,8 @@ def discover(db, asset, market, bars, now, budget):
     if candidates:
         key, spec, discovery_report = min(candidates, key=research.ranking_key)
         desired = research.target(bars, signals, spec, periods)
-        validation = research.history_metrics(bars, desired, validation_index, market.cost_bps)
+        validation = research.history_metrics(bars, desired, validation_index, market.cost_bps, periods)
+        discovery_report = research.history_metrics(bars, desired, discovery_index, market.cost_bps, periods)
         db.execute("UPDATE attempts SET validated=? WHERE version=? AND asset=? AND id=?",
                    (research.canonical(validation), research.VERSION, asset, key))
         nominee = {"id": key, "spec": spec, "validation": validation}
@@ -208,6 +227,8 @@ def discover(db, asset, market, bars, now, budget):
             start = (now.date() + timedelta(days=1)).isoformat()
             anchored = bars.iloc[-400:]
             origin = {"id": key, "source": market.source, "data_sha256": snapshot, "code": code,
+                      "data_start": date(bars.index[0]), "data_end": asof,
+                      "history_cost_bps": 2 * market.cost_bps,
                       "discovery": discovery_report, "validation": validation}
             db.execute(
                 """INSERT OR IGNORE INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)

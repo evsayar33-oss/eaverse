@@ -13,6 +13,8 @@ from collections import defaultdict, deque
 import numpy as np
 import pandas as pd
 
+from . import metrics
+
 
 VERSION = "1"
 FEATURES = {
@@ -239,9 +241,13 @@ def target(bars, signals, spec, periods):
     return result
 
 
+def interval_exposure(desired, start, end, delay):
+    return desired.shift(delay).loc[start:end].iloc[:-1].fillna(0)
+
+
 def simulation(bars, desired, start, end, cost_bps, delay=1):
     """Hold from an executable open to the following open, with terminal exit costs."""
-    exposure = desired.shift(delay).loc[start:end].iloc[:-1].fillna(0)
+    exposure = interval_exposure(desired, start, end, delay)
     open_return = (bars.open.shift(-1) / bars.open - 1).reindex(exposure.index)
     prior = exposure.shift().fillna(0)
     turnover = (exposure - prior).abs()
@@ -270,23 +276,36 @@ def stats(net, trades):
     }
 
 
-def history_metrics(bars, desired, index, cost_bps):
+def history_metrics(bars, desired, index, cost_bps, periods=None):
     folds = np.array_split(np.arange(len(index)), POLICY["history_folds"])
     results = []
     for fold in folds:
         net, trades, _ = simulation(
             bars, desired, index[fold[0]], index[fold[-1]], 2 * cost_bps, delay=2,
         )
-        results.append(stats(net, trades))
+        result = stats(net, trades)
+        if periods is not None:
+            start, end = index[fold[0]], index[fold[-1]]
+            benchmark, _, _ = simulation(bars, pd.Series(1.0, index=bars.index), start, end, 2 * cost_bps)
+            result.update(metrics.describe(net, interval_exposure(desired, start, end, 2), periods))
+            result.update({"start": start.date().isoformat(), "end": end.date().isoformat(),
+                           "benchmark_net": stats(benchmark, 0)["net"]})
+        results.append(result)
     total_net = math.prod(1 + result["net"] for result in results) - 1
     positive = sum(result["net"] > 0 for result in results)
     trades = sum(result["trades"] for result in results)
     drawdown = max(result["drawdown"] for result in results)
-    return {
+    report = {
         "net": total_net, "profitable_folds": positive, "trades": trades, "drawdown": drawdown,
         "pass": total_net > 0 and positive >= 2 and trades >= 6 and drawdown <= DRAWDOWN_LIMIT,
         "folds": results,
     }
+    if periods is not None:
+        report.update({
+            "start": index[0].date().isoformat(), "end": index[-1].date().isoformat(),
+            "benchmark_net": math.prod(1 + result["benchmark_net"] for result in results) - 1,
+        })
+    return report
 
 
 def hac_p_value(excess, lag):
@@ -302,11 +321,17 @@ def hac_p_value(excess, lag):
     return 0.5 * math.erfc(z / math.sqrt(2))
 
 
-def paper_metrics(bars, desired, start, stop, cost_bps, sequence):
+def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True):
     returns, trades, _ = simulation(bars, desired, start, stop, 2 * cost_bps, delay=PAPER_EXECUTION_DELAY)
     benchmark, _, _ = simulation(bars, pd.Series(1.0, index=bars.index), start, stop, 2 * cost_bps)
     measurements = stats(returns, trades)
+    measurements.update(metrics.describe(
+        returns, interval_exposure(desired, start, stop, PAPER_EXECUTION_DELAY), 365,
+    ))
     benchmark_net = stats(benchmark, 0)["net"]
+    measurements["benchmark_net"] = benchmark_net
+    if not final:
+        return measurements, returns, benchmark
     # Test outperformance against both buy-and-hold and cash. Use the most
     # conservative estimate across two prespecified autocorrelation lags.
     p_value = max(hac_p_value(sample, lag)
