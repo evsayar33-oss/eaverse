@@ -406,15 +406,31 @@ def main():
     p.add_argument("--symbol", choices=SYMBOLS, required=True)
     p.add_argument("--out", type=Path, default=Path("out/extended_flow"))
     p.add_argument("--ledger", type=Path)
+    p.add_argument("--statistical-ledger", type=Path)
     args = p.parse_args()
     bars, manifests = download(args.symbol)
     report = analyze(bars, manifests, args.symbol)
+    # Independent exploratory source-aligned return panel. No HOLDOUT is
+    # accessed, and the established V7 / PAPER verdict remains untouched.
+    from . import empirical_trials
+    statistical = empirical_trials.analyze(bars, report)
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.statistical_ledger:
+        statistical["ledger"] = empirical_trials.append_ledger(
+            args.statistical_ledger, statistical)
+    (args.out / "statistical_trials.json").write_text(
+        json.dumps(statistical, sort_keys=True, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     if args.ledger:
         report["ledger"] = append_ledger(args.ledger, report)
     (args.out / "report.json").write_text(
         json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
+    print("V7_EMPIRICAL_RETURNS", args.symbol,
+          "PBO", statistical["pbo"].get("pbo"),
+          "DSR", statistical["dsr"].get("dsr"),
+          "NOT_PAPER_OR_LIVE")
     print(
         "V7_REAL_SOURCE_RESEARCH", args.symbol,
         "hours", report["hours"], "archives", report["archive_months"],
