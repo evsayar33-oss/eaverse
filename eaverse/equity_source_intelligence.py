@@ -264,7 +264,7 @@ def append(path, result):
     with path.open("a",encoding="utf-8") as f:
         f.write(canonical(snapshot)+"\n")
     return {"status":"APPENDED_SOURCE_COVERAGE_NOT_AN_ALPHA_TRIAL",
-            "records":len(lines),"new_sha256":snapshot["sha256"]}
+            "records":len(lines)+1,"new_sha256":snapshot["sha256"]}
 
 
 def main():
