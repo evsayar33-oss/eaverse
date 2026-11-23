@@ -5,9 +5,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from eaverse import causal_discovery as designs
 from eaverse import research_integrity as gate
+from eaverse import oos_prospective as forward
+from eaverse import integrity_audit
 
 
 def utc(day):
@@ -216,6 +219,90 @@ class IntegrityTests(unittest.TestCase):
         crossed["levels"] = [{"side": "bids", "price": 25002, "quantity": 1}]
         with self.assertRaisesRegex(ValueError, "BOOK_CROSSED"):
             gate.validate_native_book(snapshot, [crossed])
+
+    def event_cases(self, fold, year, count=24):
+        result = []
+        for n in range(count):
+            entered = datetime(year, 4, 1, 12, tzinfo=timezone.utc) + timedelta(days=n)
+            published = entered - timedelta(hours=1)
+            exited = entered + timedelta(hours=2)
+            raw = f"{fold}-native-execution-case-{n}".encode()
+            filename = f"executions/{fold}_{n}.bin"
+            (self.root / "executions").mkdir(exist_ok=True)
+            archive_sha = self.archive(filename, raw)
+            result.append({
+                "economic_event_id": f"{fold}-{n}",
+                "publication_at_utc": published.isoformat(),
+                "actual_first_seen_at_utc": published.isoformat(),
+                "entry_at_utc": entered.isoformat(),
+                "exit_at_utc": exited.isoformat(),
+                "gross_bps": 70, "matched_control_gross_bps": 0,
+                "one_way_fee_bps": 2, "one_way_slippage_bps": 1,
+                "one_way_half_spread_bps": 1, "one_way_impact_bps": 1,
+                "venue_native_execution_evidence": True,
+                "execution_archive_path": filename,
+                "execution_archive_sha256": archive_sha,
+                "collector_first_seen_chain_verified": True,
+                "regime": "HIGH_VOL" if n % 2 else "NORMAL",
+            })
+        return result
+
+    def test_purged_out_of_sample_and_future_only_no_auto_paper(self):
+        folds = {
+            "discovery": self.event_cases("discovery", 2020),
+            "validation": self.event_cases("validation", 2021),
+            "untouched_holdout": self.event_cases("holdout", 2022),
+            "prospective": self.event_cases("forward", 2024),
+            "prospective_window": {
+                "start_utc": utc("2024-01-01"),
+                "end_utc": utc("2024-12-31")},
+        }
+        result = forward.evaluate(self.design, self.bundle, folds, root=self.root)
+        self.assertEqual(result["status"],
+                         "ALL_RESEARCH_FOLDS_PASS_MANUAL_INDEPENDENT_AUDIT_REQUIRED",
+                         result)
+        self.assertTrue(result["holdout_opened"])
+        self.assertFalse(result["paper_eligible"])
+        self.assertFalse(result["prospective_validated"])
+        self.assertEqual(result["discovery"]["familywise_trials"], 148)
+        self.assertGreater(result["discovery"]["mean_after_cost_bps"], 0)
+
+    def test_failed_validation_does_not_read_holdout(self):
+        folds = {
+            "discovery": self.event_cases("discovery", 2020),
+            "validation": self.event_cases("validation", 2021),
+            "untouched_holdout": [{"would_leak_holdout": True}],
+        }
+        for case in folds["validation"]:
+            case["matched_control_gross_bps"] = 1000
+        result = forward.evaluate(self.design, self.bundle, folds, root=self.root)
+        self.assertEqual(result["status"],
+                         "VALIDATION_REJECTED_HOLDOUT_STAYS_SEALED", result)
+        self.assertFalse(result["holdout_opened"])
+        self.assertNotIn("untouched_holdout", result)
+
+    def test_prospective_cannot_backdate_first_seen(self):
+        folds = {
+            "discovery": self.event_cases("discovery", 2020),
+            "validation": self.event_cases("validation", 2021),
+            "untouched_holdout": self.event_cases("holdout", 2022),
+            "prospective": self.event_cases("forward", 2024),
+            "prospective_window": {
+                "start_utc": utc("2024-01-01"),
+                "end_utc": utc("2024-12-31")},
+        }
+        folds["prospective"][0]["actual_first_seen_at_utc"] = utc("2023-01-01")
+        result = forward.evaluate(self.design, self.bundle, folds, root=self.root)
+        self.assertEqual(result["status"], "EVALUATION_FAIL_CLOSED", result)
+        self.assertEqual(result["reason"], "FORWARD_EVENT_NOT_NEWLY_OBSERVED_AFTER_REGISTRATION")
+        self.assertFalse(result["paper_eligible"])
+
+    def test_audit_queue_with_no_evidence_is_fully_blocked(self):
+        audit = integrity_audit.audit()
+        self.assertEqual(audit["hypothesis_count"], 148)
+        self.assertEqual(audit["blocked"], 148)
+        self.assertEqual(audit["structural_research_ready"], 0)
+        self.assertFalse(audit["live_authorized"])
 
     def test_no_immutable_or_prospective_proof_promoted(self):
         no_root = gate.preflight(self.design, self.bundle)
