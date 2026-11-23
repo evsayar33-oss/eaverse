@@ -86,7 +86,7 @@ def _bars(raw: bytes, market: str):
     bars = pd.read_csv(BytesIO(raw))
     if list(bars.columns) != ["date", "open", "high", "low", "close", "volume"]:
         raise ValueError("OHLCV must have date,open,high,low,close,volume columns")
-    index = pd.to_datetime(bars.pop("date"), format="%Y-%m-%d", errors="raise")
+    index = pd.DatetimeIndex(pd.to_datetime(bars.pop("date"), format="%Y-%m-%d", errors="raise"))
     if index.has_duplicates or not index.is_monotonic_increasing:
         raise ValueError("daily bar order/identity invalid")
     bars.index = pd.DatetimeIndex(index)
