@@ -42,6 +42,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Start bounded resource telemetry
+        continue-on-error: true
+        run: python3 scripts/resource_probe.py start
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -58,6 +61,12 @@ jobs:
           cat out/source_council/sources.json > /dev/null
           echo "Source classification is a lead list, not full historical download or PAPER approval." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Report runner capacity
+        if: always()
+        continue-on-error: true
+        run: |
+          probe="$RUNNER_TEMP/repo-resource-$GITHUB_RUN_ID-$GITHUB_JOB/probe.py"
+          if test -f "$probe"; then python3 "$probe" finish; else echo "::warning::Resource telemetry unavailable"; fi
   authenticated-archive-research:
     if: github.event_name != 'pull_request'
     needs: offline-research-contracts
@@ -77,6 +86,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Start bounded resource telemetry
+        continue-on-error: true
+        run: python3 scripts/resource_probe.py start
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -138,6 +150,12 @@ jobs:
           retention-days: 90
 
 
+      - name: Report runner capacity
+        if: always()
+        continue-on-error: true
+        run: |
+          probe="$RUNNER_TEMP/repo-resource-$GITHUB_RUN_ID-$GITHUB_JOB/probe.py"
+          if test -f "$probe"; then python3 "$probe" finish; else echo "::warning::Resource telemetry unavailable"; fi
   cross-venue-usd-price-corrob:
     # Two independent USD venues are ONLY quality references, not a new
     # Binance USDT spot taker-flow backtest or trading price substitute.
@@ -151,6 +169,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Start bounded resource telemetry
+        continue-on-error: true
+        run: python3 scripts/resource_probe.py start
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -175,3 +196,9 @@ jobs:
           path: out/cross_venue/reference.json
           if-no-files-found: warn
           retention-days: 90
+      - name: Report runner capacity
+        if: always()
+        continue-on-error: true
+        run: |
+          probe="$RUNNER_TEMP/repo-resource-$GITHUB_RUN_ID-$GITHUB_JOB/probe.py"
+          if test -f "$probe"; then python3 "$probe" finish; else echo "::warning::Resource telemetry unavailable"; fi
