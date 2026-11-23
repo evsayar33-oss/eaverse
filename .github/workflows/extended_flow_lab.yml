@@ -9,16 +9,20 @@ on:
       - 'eaverse/extended_flow.py'
       - 'eaverse/early_flow.py'
       - 'eaverse/source_council.py'
+      - 'eaverse/cross_venue_reference.py'
       - 'tests/test_extended_flow.py'
       - 'tests/test_source_council.py'
+      - 'tests/test_cross_venue_reference.py'
   pull_request:
     paths:
       - '.github/workflows/extended_flow_lab.yml'
       - 'eaverse/extended_flow.py'
       - 'eaverse/early_flow.py'
       - 'eaverse/source_council.py'
+      - 'eaverse/cross_venue_reference.py'
       - 'tests/test_extended_flow.py'
       - 'tests/test_source_council.py'
+      - 'tests/test_cross_venue_reference.py'
       - 'docs/EAVERSE_V7_RESEARCH_FOUNDRY_TR.md'
   schedule:
     - cron: '37 6 * * 2'
@@ -46,7 +50,8 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_extended_flow.py' -v
           python -m unittest discover -s tests -p 'test_source_council.py' -v
-          python -m py_compile eaverse/extended_flow.py eaverse/source_council.py eaverse/early_flow.py
+          python -m unittest discover -s tests -p 'test_cross_venue_reference.py' -v
+          python -m py_compile eaverse/extended_flow.py eaverse/source_council.py eaverse/early_flow.py eaverse/cross_venue_reference.py
       - name: Export exactly classified cross-market research providers
         run: |
           python -m eaverse.source_council --out out/source_council
@@ -129,5 +134,44 @@ jobs:
         with:
           name: eaverse-v7-${{ matrix.symbol }}-${{ github.run_id }}
           path: out/extended_flow/report.json
+          if-no-files-found: warn
+          retention-days: 90
+
+
+  cross-venue-usd-price-corrob:
+    # Two independent USD venues are ONLY quality references, not a new
+    # Binance USDT spot taker-flow backtest or trading price substitute.
+    if: github.event_name != 'pull_request'
+    needs: offline-research-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare completed Coinbase/Kraken BTC and ETH USD daily closes
+        run: |
+          python -m eaverse.cross_venue_reference --out out/cross_venue
+          python - <<'PY'
+          import json, os
+          z=json.load(open("out/cross_venue/reference.json"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("### Coinbase/Kraken recent independent USD price source\n\n")
+              for asset, row in sorted(z["sources"].items()):
+                  f.write(f"- {asset}: {row['status']}; ")
+                  f.write(f"overlapping complete days: {row.get('overlapping_completed_dates','UNVERIFIED')}\n")
+              f.write("\nNeither Kraken nor Coinbase is a drop-in substitute for Binance taker-flow history. ")
+              f.write("No PAPER/LIVE confirmation or full Kraken historical ZIP downloaded.\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eaverse-v7-independent-reference-${{ github.run_id }}
+          path: out/cross_venue/reference.json
           if-no-files-found: warn
           retention-days: 90
