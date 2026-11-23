@@ -7,10 +7,12 @@ Existing Eaverse production/PAPER and previous V5 hypotheses are not modified.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import hashlib
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +20,7 @@ import pandas as pd
 
 from . import early_flow, pit_binance_pilot
 
-SCHEMA = "eaverse.extended_flow.v7"
+SCHEMA = "eaverse.extended_flow.v7.1"
 SYMBOLS = (
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
     "BNBUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT",
@@ -36,6 +38,65 @@ NO_PROMOTION = {"paper_eligible": False, "live_allowed": False, "forward_validat
 RESEARCH_RIGHTS = "PERSONAL_NONCOMMERCIAL_RESEARCH_ONLY"
 MIN_HOURS = 24 * 365 * 3
 
+# Binance officially stopped spot trading on 2023-03-24, restarting at 14:00 UTC.
+# Its signed original monthly archive can contain a partial 12:00 bar and has
+# no ordinary 13:00 1h kline. These are NOT tradable filled hourly candles.
+MAINTENANCE_UTC = pd.DatetimeIndex([
+    pd.Timestamp("2023-03-24T12:00:00Z"),
+    pd.Timestamp("2023-03-24T13:00:00Z"),
+])
+# Exclude any potential 24h holding outcome crossing the halt, all prior control
+# outcomes across the halt, and the 168h feature warm-up following the halt.
+GUARD_FROM = pd.Timestamp("2023-03-23T11:00:00Z")
+GUARD_THROUGH = pd.Timestamp("2023-03-31T14:00:00Z")
+MAINTENANCE_SOURCE = (
+    "https://www.binance.com/en/support/announcement/detail/"
+    "813a31506e9f478ea8c1058b425df87a"
+)
+
+
+def expected_hours():
+    original = pd.date_range("2023-01-01T00:00:00Z", "2025-12-31T23:00:00Z", freq="h")
+    return original[~original.isin(MAINTENANCE_UTC)]
+
+
+def _remove_documented_exchange_blackout(raw: bytes):
+    """Only remove original rows within Binance's independently documented halt.
+
+    No fake candles, interpolation, merging different venues, or broad
+    'skip any invalid data' logic: bad bars elsewhere remain fatal.
+    """
+    try:
+        rows = csv.reader(io.StringIO(raw.decode("utf-8-sig")))
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        removed = 0
+        for row in rows:
+            if not row:
+                continue
+            if len(row) != 12:
+                raise ValueError("MONTHLY_EXCHANGE_SOURCE_MUST_HAVE_12_FIELDS")
+            opening = int(row[0])
+            unit = 1_000_000 if opening >= 10**15 else 1000
+            timestamp = pd.Timestamp(datetime.fromtimestamp(opening/unit, timezone.utc))
+            if timestamp in MAINTENANCE_UTC:
+                removed += 1
+                if removed > 2:
+                    raise ValueError("DUPLICATE_MAINTENANCE_BAR_IN_SIGNED_SOURCE")
+                continue
+            writer.writerow(row)
+        return buffer.getvalue().encode("utf-8"), removed
+    except (UnicodeError, TypeError, OverflowError, OSError) as exc:
+        raise ValueError("INVALID_MAINTENANCE_ARCHIVE_ENCODING_OR_EPOCH") from exc
+
+
+def _apply_halt_guard(feat):
+    result = feat.copy()
+    blocked = (result.index >= GUARD_FROM) & (result.index <= GUARD_THROUGH)
+    result.loc[blocked, "quiet"] = False
+    return result
+
+
 
 def hash_obj(obj):
     return hashlib.sha256(
@@ -49,14 +110,20 @@ def _verified_months(blobs, symbol):
     if tuple(sorted(blobs)) != MONTHS:
         raise ValueError("HISTORICAL_MONTH_COVERAGE_NOT_CONTIGUOUS")
     rows = []
+    removed_vendor_rows = 0
     for month in MONTHS:
-        rows.extend(early_flow._hourly_csv(blobs[month], symbol, month))
+        payload = blobs[month]
+        if month == "2023-03":
+            payload, removed_vendor_rows = _remove_documented_exchange_blackout(payload)
+        try:
+            rows.extend(early_flow._hourly_csv(payload, symbol, month))
+        except ValueError as exc:
+            raise ValueError(f"INVALID_SIGNED_HOURLY_ARCHIVE_MONTH_{month}: {exc}") from exc
     timestamps = pd.DatetimeIndex([r[0] for r in rows], tz="UTC")
     if timestamps.has_duplicates or not timestamps.is_monotonic_increasing:
         raise ValueError("DUPLICATE_OR_OUT_OF_ORDER_HOURLY_BARS")
-    expected = pd.date_range("2023-01-01T00:00:00Z", "2025-12-31T23:00:00Z", freq="h")
-    if not timestamps.equals(expected):
-        raise ValueError("MISSING_EXTRA_OR_NONHOURLY_SOURCE_ROWS")
+    if not timestamps.equals(expected_hours()):
+        raise ValueError("UNEXPLAINED_HOURLY_GAP_OR_EXTRA_BAR_OUTSIDE_DOCUMENTED_MAINTENANCE")
     if len(rows) < MIN_HOURS:
         raise ValueError("INSUFFICIENT_THREE_YEAR_HISTORY")
     df = pd.DataFrame(
@@ -64,6 +131,10 @@ def _verified_months(blobs, symbol):
         columns=("open", "high", "low", "close", "volume", "quote_volume", "taker_buy_base"),
         dtype=float,
     )
+    df.attrs["excluded_source_rows_during_official_maintenance"] = removed_vendor_rows
+    df.attrs["documented_nontradable_hours"] = [
+        ts.isoformat() for ts in MAINTENANCE_UTC
+    ]
     return df
 
 
@@ -176,9 +247,7 @@ def _next_work(results, symbol):
 def analyze(bars, manifests, symbol, captured_utc=None):
     if symbol not in SYMBOLS:
         raise ValueError("UNREGISTERED_RESEARCH_ASSET")
-    if not bars.index.equals(pd.date_range(
-        "2023-01-01T00:00:00Z", "2025-12-31T23:00:00Z", freq="h"
-    )):
+    if not bars.index.equals(expected_hours()):
         raise ValueError("SOURCE_HOURS_MUST_MATCH_PREREGISTERED_CALENDAR")
     if (len(manifests) != len(MONTHS) or
         [p.get("month") for p in manifests] != list(MONTHS) or
@@ -186,7 +255,7 @@ def analyze(bars, manifests, symbol, captured_utc=None):
                 p.get("asset") == symbol and p.get("venue") == "BINANCE_SPOT"
                 for p in manifests)):
         raise ValueError("MISSING_OR_CROSS_VENUE_SOURCE_PROVENANCE")
-    feat = early_flow.asof_features(bars)
+    feat = _apply_halt_guard(early_flow.asof_features(bars))
     splits = early_flow.folds(len(bars))
     reports = []
     for family in FAMILIES:
@@ -253,6 +322,8 @@ def analyze(bars, manifests, symbol, captured_utc=None):
         "horizons": list(HORIZONS), "fee_bps_stress": early_flow.ROUND_TRIP_BPS,
         "max_lag": "past-only", "holdout_sealed": True,
         "multiple_testing_count_per_asset": NUM_HYPOTHESES,
+        "documented_2023_exchange_halt_exclusion": [t.isoformat() for t in MAINTENANCE_UTC],
+        "no_lookbacks_or_outcomes_across_exchange_halt": True,
         "familywise_error_alpha_verified": False,
         "data_rights": RESEARCH_RIGHTS,
     }
@@ -261,6 +332,13 @@ def analyze(bars, manifests, symbol, captured_utc=None):
         "captured_utc": captured_utc or datetime.now(timezone.utc).isoformat(),
         "market": "CRYPTO", "venue": "BINANCE_SPOT",
         "hours": len(bars), "archive_months": len(manifests),
+        "documented_nontradable_utc_hours": [t.isoformat() for t in MAINTENANCE_UTC],
+        "original_signed_archive_rows_during_halt_omitted": bars.attrs.get(
+            "excluded_source_rows_during_official_maintenance", 0
+        ),
+        "signal_control_guard_start_utc": GUARD_FROM.isoformat(),
+        "signal_control_guard_end_utc": GUARD_THROUGH.isoformat(),
+        "maintenance_evidence_url": MAINTENANCE_SOURCE,
         "source_zip_provenance": manifests,
         "source_digest": hash_obj([
             (p["month"], p["zip_sha256"], p["csv_sha256"]) for p in manifests
