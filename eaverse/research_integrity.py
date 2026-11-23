@@ -251,7 +251,8 @@ def preflight(design, bundle=None, *, root=None):
             raise ValueError("DESIGN_SOURCE_RECEIPTS_MISSING")
         for source_id, row in evidence_by_id.items():
             reference = sources[source_id]
-            if row["market"] != design["market"] or row["asset_identity"] != stable:
+            if (row["market"] != design["market"] or reference["market"] != design["market"]
+                or row["asset_identity"] != stable):
                 raise ValueError("SOURCE_MARKET_OR_IDENTITY_MISMATCH")
             if row["venue"] != reference["venue"] or row["feature_family"] != reference["feature_family"]:
                 raise ValueError("VENUE_OR_FEATURE_FAMILY_SUBSTITUTED")
