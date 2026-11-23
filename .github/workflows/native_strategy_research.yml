@@ -9,6 +9,8 @@ on:
     paths:
       - '.github/workflows/native_strategy_research.yml'
       - 'docs/NATIVE_STRATEGY_RESEARCH.md'
+      - 'eaverse/paper_risk_audit.py'
+      - 'tests/test_paper_risk_audit.py'
   schedule:
     - cron: '55 7 * * *'
 permissions:
@@ -91,6 +93,21 @@ jobs:
             --ledger "$MESH_LEDGER_ROOT/observations/strategy_mesh/observations.jsonl" \
             --out out/native_mesh "${ARGS[@]}"
           cat out/native_mesh/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Analyze completed PAPER path-risk from signed Release only (no trades)
+        if: github.event_name != 'pull_request' && env.MESH_RELEASE_PANEL != ''
+        shell: bash
+        run: |
+          python -m eaverse.paper_risk_audit \
+            --panel "$MESH_RELEASE_PANEL" \
+            --out out/native_mesh/paper_path_risk.json
+          python - <<'PY'
+          import json, os
+          r=json.load(open("out/native_mesh/paper_path_risk.json"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("Read-only PAPER path-risk diagnostics: " +
+                      str(r["completed_risk_diagnostics"]) +
+                      " completed; no new acceptance or orders.\\n")
+          PY
       - name: Append only hashed research evidence in isolated branch
         if: github.event_name != 'pull_request'
         shell: bash
