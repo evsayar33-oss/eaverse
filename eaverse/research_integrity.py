@@ -247,8 +247,9 @@ def preflight(design, bundle=None, *, root=None):
         evidence_by_id = {x["source_id"]: x for x in bundle["source_receipts"]}
         if len(evidence_by_id) != len(bundle["source_receipts"]):
             raise ValueError("DUPLICATE_SOURCE_RECEIPTS")
-        for channel, source_id in zip(design["event_features"], design["source_ids"]):
-            row = evidence_by_id[source_id]
+        if not set(design["source_ids"]).issubset(evidence_by_id):
+            raise ValueError("DESIGN_SOURCE_RECEIPTS_MISSING")
+        for source_id, row in evidence_by_id.items():
             reference = sources[source_id]
             if row["market"] != design["market"] or row["asset_identity"] != stable:
                 raise ValueError("SOURCE_MARKET_OR_IDENTITY_MISMATCH")
@@ -269,16 +270,34 @@ def preflight(design, bundle=None, *, root=None):
                           observation_at=row["observation_at_utc"],
                           decision_at=decision)
             verified_blob(root, row["archive_path"], row["raw_sha256"])
+            if row["revision_id"] != revision_asof(
+                    row["revisions"], observation_at=row["observation_at_utc"],
+                    decision_at=decision)["revision_id"]:
+                raise ValueError("REVISION_USED_BEFORE_PUBLISHED")
             if reference["feature_family"] in NATIVE_FAMILIES:
                 if (row.get("exchange_native") is not True or
                     row.get("native_gap_count") != 0 or
-                    row.get("native_instrument") != bundle["asset"]):
+                    not row.get("native_instrument")):
                     raise ValueError("NATIVE_VENUE_TAPE_INCOMPLETE")
+                if source_id in design["source_ids"] and row["native_instrument"] != bundle["asset"]:
+                    raise ValueError("NATIVE_INSTRUMENT_MISMATCH")
+                if source_id not in design["source_ids"] and row.get("cross_venue_identity_mapping_verified") is not True:
+                    raise ValueError("CORROBORATION_CROSS_VENUE_IDENTITY_NOT_VERIFIED")
         if (not bundle.get("primary_event") or not bundle.get("independent_confirmation")):
             raise ValueError("INDEPENDENT_SOURCE_PROOF_MISSING")
-        independent_confirmation(bundle["primary_event"],
-                                 bundle["independent_confirmation"],
-                                 decision_at=decision)
+        primary = bundle["primary_event"]
+        confirming = bundle["independent_confirmation"]
+        if primary.get("source_id") not in design["source_ids"]:
+            raise ValueError("PRIMARY_NOT_REGISTERED_IN_DESIGN")
+        if confirming.get("source_id") not in evidence_by_id or confirming["source_id"] == primary["source_id"]:
+            raise ValueError("CONFIRMATION_NOT_AN_AUDITED_INDEPENDENT_SOURCE")
+        for event in (primary, confirming):
+            receipt = evidence_by_id[event["source_id"]]
+            if (event.get("origin_lineage_root") != receipt.get("origin_lineage_root")
+                or event.get("publisher") != receipt.get("venue")
+                or stamp(event["public_at_utc"]) < stamp(receipt["official_publication_at_utc"])):
+                raise ValueError("EVENT_NOT_LINKED_TO_AUDITED_SOURCE")
+        independent_confirmation(primary, confirming, decision_at=decision)
         for receipt in bundle["source_receipts"]:
             if receipt.get("feature_family") == "l2_orderbook_sequence":
                 proof = bundle.get("native_l2")
@@ -287,6 +306,8 @@ def preflight(design, bundle=None, *, root=None):
                 validated = validate_native_book(proof["snapshot"], proof["deltas"])
                 if validated["instrument"] != receipt["native_instrument"]:
                     raise ValueError("L2_INSTRUMENT_MISMATCH")
+                if stamp(validated["last_public_at_utc"]) > stamp(decision):
+                    raise ValueError("FUTURE_L2_DELTA_IN_EVENT")
         contract = validate_study_contract(bundle["study"], decision_at=decision)
         return {**base, "status": "PIT_RESEARCH_READY_NOT_ALPHA",
                 "research_ready": True, "contract": contract,
