@@ -1,0 +1,48 @@
+name: Eaverse V8 causal discovery designs (NO TRADING)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'eaverse/causal_discovery.py'
+      - 'tests/test_causal_discovery.py'
+      - '.github/workflows/causal_discovery.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'eaverse/causal_discovery.py'
+      - 'tests/test_causal_discovery.py'
+      - '.github/workflows/causal_discovery.yml'
+  schedule:
+    - cron: '41 6 * * 1'
+permissions:
+  contents: read
+jobs:
+  bounded-source-aware-design:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_causal_discovery.py' -v
+      - run: python -m eaverse.causal_discovery --out out/causal_discovery
+      - name: Check report is design-only
+        run: |
+          python - <<'PY'
+          import json
+          report=json.load(open('out/causal_discovery/queue.json'))
+          assert report['new_backtests_completed']==0
+          assert report['new_paper_approvals']==0
+          assert report['live_authorized'] is False
+          assert len(report['designs'])<=300
+          print('SAFE_DESIGN_QUEUE',report['by_market'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eaverse-v8-causal-design-queue
+          path: out/causal_discovery/queue.json
+          retention-days: 90
