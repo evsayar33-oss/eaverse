@@ -122,3 +122,22 @@ duyuru saati, fiyat/split/delist ve orijinal kaynak hakları gerekir.
 Cboe VIX doğrulamasında reddedilen alan/sıra/OHLC nedeni, tam ham
 arşiv yayımlanmadan kodla birlikte raporlanır ve doğrulayıcı
 yalnız gerçek dosya biçimine göre düzeltilebilir.
+
+### VIX gerçek veri kalitesi ve kapanış-only araştırma
+
+Resmî Cboe VIX arşivi (475.114 bayt) başarılı olarak indirildi,
+ancak ilk OHLC doğrulayıcısında **INVALID_DUPLICATE_OR_INCONSISTENT_VIX**
+sonucuna yol açan bazı satırlar bulunuyor. Yeni denetim, doğrulanmış
+orijinal kaynak SHA'sı ve kapsamıyla beraber OHLC tutarsız, geçersiz
+kapanışlı, aynı tarihli tekrar ve sırasız satır sayılarını **ayrı**
+tutar. Günlük kapanışı geçerli ise salt geçmiş VIX kapanış rejimi
+taramasının sayıları üretilebilir; hatalı intraday OHLC alanları
+tamir edilmez veya mum simülasyonunda kullanılmaz.
+
+Herhangi bir anomali varsa çıktı
+**OFFICIAL_VIX_CLOSE_HISTORY_HAS_OHLC_OR_DUPLICATE_ANOMALIES**
+olarak işaretlenir, tam OHLC doğrulanmış sayılmaz. Kapanış bazlı
+25/35 seviye geçişleri yalnız geriye dönük tanımlayıcı istatistiktir;
+orijinal yayımlanma saati, düzeltme vintage'ı, sıfır hatalı tam veri
+ve bağımsız PIT fiyat eşleşmesi yokken **PAPER/live faktörü**
+olarak terfi edemez.
