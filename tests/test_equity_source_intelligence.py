@@ -70,13 +70,35 @@ class EquitySourceAssuranceTests(unittest.TestCase):
         self.assertFalse(result["official_original_publication_timestamps_verified"])
         self.assertTrue(result["membership_clock_is_effective_date_not_publication"])
 
-    def test_bist_duplicate_issuer_in_date_fails(self):
+    def test_bist_duplicate_issuer_in_date_is_explicit_ambiguity(self):
         blob=bist_sample()
         lines=blob.splitlines()
-        # A single duplicate changes the true universe, not just its count.
+        # Never silently count a duplicate as an extra unique issuer.
         lines.append(lines[1])
-        with self.assertRaisesRegex(ValueError,"DUPLICATE"):
-            eql.bist_coverage(b"\n".join(lines)+b"\n")
+        result=eql.bist_coverage(b"\n".join(lines)+b"\n")
+        self.assertEqual(result["duplicate_symbol_date_rows"],1)
+        self.assertEqual(result["conflicting_tier_duplicate_rows"],0)
+        self.assertEqual(result["distinct_snapshot_symbol_keys"],110*202)
+        self.assertIn("AMBIGUITIES",result["status"])
+        self.assertFalse(result["universe_pit_trade_eligible"])
+
+    def test_bist_conflicting_tier_for_duplicate_is_not_hidden(self):
+        lines=bist_sample().splitlines()
+        first=lines[1].decode().split(",")
+        first[-2]="XU100"
+        lines.append(",".join(first).encode())
+        result=eql.bist_coverage(b"\n".join(lines)+b"\n")
+        self.assertEqual(result["duplicate_symbol_date_rows"],1)
+        self.assertEqual(result["conflicting_tier_duplicate_rows"],1)
+        self.assertFalse(result["universe_pit_trade_eligible"])
+
+    def test_source_schema_failure_records_specific_safe_reason(self):
+        source=eql._attempt("CBOE",eql.VIX_URL,eql.vix_coverage,
+                            lambda u,l,a:b"nonsense")
+        self.assertEqual(source["validation_reason_code"],"VIX_COLUMN_SCHEMA_MISSING")
+        self.assertEqual(source["bytes_received"],len(b"nonsense"))
+        self.assertEqual(len(source["raw_source_sha256"]),64)
+        self.assertNotIn("nonsense",json.dumps(source))
 
     def test_sec_requires_real_identifying_contact_and_keeps_CIK(self):
         now=datetime(2026,11,23,12,tzinfo=timezone.utc)

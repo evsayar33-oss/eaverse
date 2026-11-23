@@ -118,7 +118,9 @@ def bist_coverage(raw):
         raise ValueError("BIST_MEMBERSHIP_SCHEMA_MISSING")
     rows=0
     tickers=set()
-    seen=set()
+    seen={}
+    duplicated_keys=0
+    conflicting_tier_keys=0
     dates=defaultdict(Counter)
     for record in reader:
         d=str(record["snapshot_date"]).strip()
@@ -133,8 +135,13 @@ def bist_coverage(raw):
             raise ValueError("BAD_BIST_TICKER_OR_EXCLUSIVE_TIER")
         key=d,ticker
         if key in seen:
-            raise ValueError("BIST_DUPLICATE_ISSUER_IN_SNAPSHOT")
-        seen.add(key)
+            duplicated_keys+=1
+            if seen[key]!=tier:
+                conflicting_tier_keys+=1
+            # Keep the original raw-row count, but never infer two
+            # independent issuers or fabricate a clean historical identity.
+        else:
+            seen[key]=tier
         dates[d][tier]+=1
         tickers.add(ticker)
         rows+=1
@@ -147,7 +154,11 @@ def bist_coverage(raw):
     # In this community source an unpublished 2026-10 review may have
     # no full tiers. Incomplete snapshots are NEVER used as actual members.
     return {
-        "status":"COMMUNITY_RECONSTRUCTED_HISTORICAL_UNIVERSE_COVERAGE",
+        "status":("COMMUNITY_RECONSTRUCTED_HISTORY_HAS_TICKER_AMBIGUITIES"
+                  if duplicated_keys else "COMMUNITY_RECONSTRUCTED_HISTORICAL_UNIVERSE_COVERAGE"),
+        "duplicate_symbol_date_rows":duplicated_keys,
+        "conflicting_tier_duplicate_rows":conflicting_tier_keys,
+        "distinct_snapshot_symbol_keys":len(seen),
         "membership_rows":rows,"unique_issuer_symbols":len(tickers),
         "review_snapshots":len(dates),"complete_tier_snapshots":len(complete),
         "first_snapshot":min(dates),"latest_snapshot_date":max(dates),
@@ -186,6 +197,7 @@ def sec_coverage(raw, cik, captured):
 
 
 def _attempt(label, url, parser, getter, agent=None):
+    data=None
     try:
         data=getter(url,MAX_SOURCE_BYTES,agent)
         findings=parser(data)
@@ -193,9 +205,20 @@ def _attempt(label, url, parser, getter, agent=None):
                 "publisher_url":url,"bytes_verified":len(data)}
     except (HTTPError,URLError,TimeoutError,OSError,UnicodeError,
             json.JSONDecodeError,ValueError,TypeError,KeyError) as exc:
-        return {"status":"SOURCE_UNAVAILABLE_OR_INTEGRITY_REJECTED",
+        # Preserve precise bounded source-quality reason without copying
+        # source records, prices, private data, or provider response bodies.
+        result={"status":"SOURCE_UNAVAILABLE_OR_INTEGRITY_REJECTED",
                 "failure_type":type(exc).__name__,"publisher_url":url,
                 "alpha_proven":False}
+        if isinstance(exc, ValueError):
+            reason=str(exc)
+            result["validation_reason_code"]=(
+                reason[:90] if re.fullmatch(r"[A-Z0-9_]+",reason) else
+                "INVALID_FORMAT_OR_UNKNOWN_SOURCE_SCHEMA")
+        if data is not None:
+            result["raw_source_sha256"]=hashlib.sha256(data).hexdigest()
+            result["bytes_received"]=len(data)
+        return result
 
 
 def audit(now=None, getter=get, sec_agent=None):

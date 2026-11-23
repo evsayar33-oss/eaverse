@@ -97,3 +97,28 @@ bilinebilir biçimde tekrar oynatılması.
 Bu sürümün başarısı, **source readiness kayıtlarının
 gerçek kaynak üzerinde çalışmasıdır**; yeni alpha,
 PAPER veya LIVE performans onayı değildir.
+
+### Gerçek kaynak temizliği ve hatalı görünür başarı kontrolü (23 Kasım 2026)
+
+İlk GitHub Actions çalışması işlem olarak başarılı olsa da Cboe VIX ile
+BIST üyeliğinin her ikisi doğrulamada reddedilmişti. Bu bir **veri
+doğrulaması başarısı değildir**. Yeni kontrol, kaynak geri dönmüşse
+SHA-256/byte sayısını ve güvenli, kısa doğrulama-hatası kodunu da kanıt
+dosyasına yazar. Sadece workflow yeşili kaynak başarılı demek değildir.
+
+GocmenCo kaynağının gerçek sabit Git blob'u incelendi: **54.008 veri
+satırı**, **927 sembol**, **134 tarihsel kesit** ve bunların
+**133 tanesinde** münhasır 30/20/50 endeks katmanı mevcut. Ancak geçmiş
+kesitlerde BYSAN, TUMTK ve TSGYO gibi tekrar eden aynı-gün ticker
+kimlikleri var. Bunları sanki bağımsız iki hisseymiş gibi saymak veya
+sessizce silip evreni kusursuz ilan etmek hatalıdır; güncellenen
+denetim tam miktarını, farklı tier uyuşmazlıklarını ve
+**UNIVERSE_PIT_TRADE_ELIGIBLE=false** durumunu kaydeder.
+2026-10-01 kesitinin 0/0/0 üyeliği 2026-07-01 sonrası
+tam bir endeks yenilemesi sayılmaz.
+
+BIST üzerinde gerçek geçmiş trade/backtest için ayrıca şirket kimliği,
+duyuru saati, fiyat/split/delist ve orijinal kaynak hakları gerekir.
+Cboe VIX doğrulamasında reddedilen alan/sıra/OHLC nedeni, tam ham
+arşiv yayımlanmadan kodla birlikte raporlanır ve doğrulayıcı
+yalnız gerçek dosya biçimine göre düzeltilebilir.
