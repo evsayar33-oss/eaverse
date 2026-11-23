@@ -123,11 +123,11 @@ class EquitySourceAssuranceTests(unittest.TestCase):
                          vix_sample() if url==eql.VIX_URL else bist_sample())
         with tempfile.TemporaryDirectory() as folder:
             p=Path(folder)/"ledger.jsonl"
-            self.assertEqual(eql.append(p,result)["records"],0)
+            self.assertEqual(eql.append(p,result)["records"],1)
             self.assertIn("UNCHANGED",eql.append(p,result)["status"])
             altered=json.loads(json.dumps(result))
             altered["sources"]["CBOE_VIX_1990_HISTORY"]["raw_source_sha256"]="different"
-            self.assertEqual(eql.append(p,altered)["records"],1)
+            self.assertEqual(eql.append(p,altered)["records"],2)
             entries=p.read_text().splitlines()
             tampered=json.loads(entries[0])
             tampered["market_coverage"]["US"]="FABRICATED"
