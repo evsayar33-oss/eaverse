@@ -120,3 +120,28 @@ Aynı kaynak/politika tekrar çalıştırılırsa
 yeni forward gözlem uydurulmaz.
 Strateji araştırma başarısı, kârlılık
 kanıtı veya live işlem izni değildir.
+
+
+## İlk gerçek yedek-doğrulama deneyi
+
+V7 ayrıca Kraken ve Coinbase Exchange'in public REST günlük OHLC
+uçlarını kullanarak BTC/USD ve ETH/USD için en son 60-66 günün
+tamamlanmış günlük kapanışlarını birbirinden bağımsız getirir.
+Kraken API son 720 aralık ile sınırlıdır; bu deneme Kraken'in
+ilk tarihten itibaren bulunan büyük ZIP arşivinin indirilmesi
+anlamına gelmez. Coinbase çağrısı 300 mum limitinin altındadır.
+
+Her kaynak için ham yanıtın SHA-256'sı, tamamlanmış günlük
+örnek sayısı, iki borsa arasında örtüşen günler ve fiyat
+sapma istatistikleri JSON kanıtı olarak yazılır.
+Veri alınamıyorsa açıkça INDEPENDENT_DATA_SOURCE_NOT_VERIFIED
+durumu çıkar; sahte kaynak üretilmez. Yüksek farklılık
+arbitraj/bedava kâr ilan edilmez.
+
+Bu iki çift USD fiyatlarını karşılaştırır; Binance USDT
+hacmine, taker-flow, funding veya OHLCV arşivlerine
+sessizce eklenmez. CROSS-VENUE yedek kaynak şimdilik
+**bağımsız kalite teyidi** olarak çalışır; üretim
+veri sağlayıcısını değiştirmez. Gerçek hedge/fill,
+tam çok yıllı Kraken/OKX derinlik entegrasyonu
+ve tarihsel yayın-vintage kanıtı ayrıca gereklidir.
