@@ -1,0 +1,112 @@
+name: Eaverse V6 equity historical-source intelligence (NO ORDERS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/equity_source_intelligence.yml
+      - eaverse/equity_source_intelligence.py
+      - tests/test_equity_source_intelligence.py
+  pull_request:
+    paths:
+      - .github/workflows/equity_source_intelligence.yml
+      - eaverse/equity_source_intelligence.py
+      - tests/test_equity_source_intelligence.py
+      - docs/EAVERSE_EQUITY_SOURCE_INTELLIGENCE_TR.md
+  schedule:
+    - cron: '15 7 * * 2'  # best-effort after a BIST/US reporting session
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eaverse-equity-source-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline-issuer-pit-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_equity_source_intelligence.py' -v
+      - run: python -m py_compile eaverse/equity_source_intelligence.py
+
+  real-source-readiness:
+    needs: offline-issuer-pit-integrity
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 17
+    permissions:
+      contents: write
+    env:
+      SEC_RESEARCH_USER_AGENT: ${{ secrets.SEC_RESEARCH_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Restore isolated source evidence chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          B="research/eaverse-equity-source-evidence"
+          ROOT="$RUNNER_TEMP/equity-source-state"
+          if git ls-remote --exit-code --heads origin "$B" >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin "refs/heads/$B"
+            git worktree add --detach "$ROOT" FETCH_HEAD
+          else
+            git worktree add --detach "$ROOT" HEAD
+          fi
+          mkdir -p "$ROOT/observations/equity_sources"
+          echo "EQUITY_SOURCE_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "EQUITY_SOURCE_BRANCH=$B" >> "$GITHUB_ENV"
+      - name: Audit Cboe VIX history, BIST reconstructed membership and optional SEC filings
+        run: |
+          set -euo pipefail
+          python -m eaverse.equity_source_intelligence \
+            --out out/equity_source_intelligence \
+            --ledger "$EQUITY_SOURCE_ROOT/observations/equity_sources/source_log.jsonl"
+          python - <<'PY'
+          import json, os
+          z=json.load(open("out/equity_source_intelligence/coverage_report.json"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("### Real Eaverse equity source-readiness audit\n\n")
+              for source, outcome in sorted(z["sources"].items()):
+                  state=outcome["status"]
+                  f.write(f"- {source}: **{state}**\n")
+                  if "UNAVAILABLE" in state or "REJECTED" in state:
+                      f.write(f"  - Blocked: {outcome.get('failure_type','UNKNOWN')}\n")
+              f.write("\n**No issuer/price PIT qualification or forward/PAPER/LIVE acceptance.**\n")
+          PY
+      - name: Persist only source fingerprints and coverage in Eaverse research branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$EQUITY_SOURCE_ROOT"
+          git -C "$ROOT" config user.name 'github-actions[bot]'
+          git -C "$ROOT" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$ROOT" add observations/equity_sources/source_log.jsonl
+          if git -C "$ROOT" diff --cached --quiet; then
+            echo 'SOURCE_SNAPSHOT_UNCHANGED_NO_NEW_EVIDENCE' >> "$GITHUB_STEP_SUMMARY"
+          else
+            git -C "$ROOT" commit -m "research(equity): source PIT availability/coverage SHA evidence [skip ci]"
+            git -C "$ROOT" push origin "HEAD:refs/heads/$EQUITY_SOURCE_BRANCH"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eaverse-equity-source-audit-${{ github.run_id }}
+          path: out/equity_source_intelligence/coverage_report.json
+          retention-days: 90
+          if-no-files-found: warn
