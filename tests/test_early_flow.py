@@ -146,10 +146,34 @@ class HourlyResearchTests(unittest.TestCase):
         for exp in report["results"]:
             self.assertTrue(set(exp["folds"])=={"discovery","validation","untouched_holdout"})
             self.assertFalse(exp["trade_authorized"])
+            if exp["holdout_opened_only_after_discovery_validation"]:
+                self.assertNotEqual(exp["folds"]["untouched_holdout"]["data_status"],
+                                    "SEALED_UNTIL_PRESELECTION_PASSES")
+            else:
+                self.assertEqual(exp["folds"]["untouched_holdout"]["data_status"],
+                                 "SEALED_UNTIL_PRESELECTION_PASSES")
+                self.assertIsNone(exp["folds"]["untouched_holdout"]["cases_nonoverlapping"])
             if exp["direction"]=="RISK_AVOIDANCE_NOT_SHORT":
                 self.assertIsNone(exp["folds"]["validation"]["mean_case_after_stressed_fees_bps"])
             if exp["decision"].startswith("EXPLORATORY"):
                 self.assertFalse(exp["paper_eligible"])
+
+    def test_no_fabricated_holdout_when_all_flow_signals_absent(self):
+        bars=sample_bars()
+        bars["taker_buy_base"]=bars["volume"]*.5
+        provenance=[{"month":m,"checksum_verified":True,
+                     "zip_sha256":"a"*64,"csv_sha256":"b"*64}
+                    for m in early_flow.MONTHS]
+        result=early_flow.analyze(bars,provenance,"ETHUSDT",
+                                  captured_utc="2026-11-23T12:00:00Z")
+        self.assertEqual(result["experiment_count"],32)
+        self.assertFalse(result["forward_validated"])
+        self.assertTrue(all(
+            not item["holdout_opened_only_after_discovery_validation"] and
+            item["folds"]["untouched_holdout"]["data_status"] ==
+            "SEALED_UNTIL_PRESELECTION_PASSES"
+            for item in result["results"]
+        ))
 
     def test_metadata_ledger_chain_dedup_and_tamper(self):
         report={"captured_utc":"2026-11-23T12:00:00Z",
