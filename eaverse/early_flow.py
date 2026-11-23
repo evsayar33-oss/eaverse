@@ -40,7 +40,8 @@ EMBARGO = 25  # hours, larger than maximal studied 24-hour hold
 MIN_CASES = {"discovery": 30, "validation": 15, "untouched_holdout": 15}
 ONE_WAY_BPS = 12.0  # explicit Binance spot fee+slippage assumption, not live fills
 STRESS_MULTIPLIER = 2.0
-ROUND_TRIP_BPS = 2 * ONE_WAY_BPS * STRESS_MULTIPLIER
+BASE_ROUND_TRIP_BPS = 2 * ONE_WAY_BPS
+ROUND_TRIP_BPS = BASE_ROUND_TRIP_BPS * STRESS_MULTIPLIER
 MAX_MATCH_LOOKBACK = 24 * 28
 MAX_SOURCE_RECORDS = 24 * 366 * 2 + 24 * 7
 
@@ -249,12 +250,15 @@ def _evaluate_one(bars, feat, family, direction, horizon, split, *, open_holdout
             "directional_hit_rate":round(float(np.mean(cases>0)),5) if n else None,
             "mean_signed_gross_bps":round(float(np.mean(cases)),3) if n else None,
             "mean_matched_control_bps":round(float(np.mean(comp)),3) if len(comp) else None,
+            "mean_case_after_base_fees_bps":(
+                round(float(np.mean(cases))-BASE_ROUND_TRIP_BPS,3) if n and direction==1 else None),
             "mean_case_after_stressed_fees_bps":(
                 round(float(np.mean(cases))-ROUND_TRIP_BPS,3) if n and direction==1 else None),
             "mean_matched_lift_bps":(
                 round(float(np.mean(cases))-float(np.mean(comp)),3)
                 if len(comp)>=max(8,n//2) and n else None),
             "minimum_sample_satisfied":enough,
+            "base_cost_bps_round_trip_assumption":BASE_ROUND_TRIP_BPS,
             "cost_bps_round_trip_assumption":ROUND_TRIP_BPS,
             "downside_case_is_executable_spot_short":False,
             "data_status":"DESCRIPTIVE_ONLY" if enough else "INSUFFICIENT_INDEPENDENT_CASES",
@@ -329,6 +333,7 @@ def analyze(bars: pd.DataFrame, provenance: list, symbol: str, *, captured_utc: 
         "preregistered_families":list(FAMILIES),"directions":list(DIRECTIONS),
         "horizons_hours":list(HORIZONS),"start":"2024-01-01","end":"2025-12-31",
         "one_way_bps_fee_slippage_assumption":ONE_WAY_BPS,
+        "base_roundtrip_bps":BASE_ROUND_TRIP_BPS,
         "stress_multiplier":STRESS_MULTIPLIER,
         "pre_price_definition":"signal at fully closed 1h bar with abs bar return <=0.4pct; NO PRICE BREAKOUT REQUIRED",
         "entry":"NEXT_HOURLY_OPEN","exit":"h_hours_later_open",
@@ -351,8 +356,45 @@ def analyze(bars: pd.DataFrame, provenance: list, symbol: str, *, captured_utc: 
         "raw_market_data_exported":False}
 
 
+STUDY_DETAIL_SCHEMA = "eaverse.early_flow_study_details.v1"
+
+
+def evidence_details(report):
+    """Durable aggregate outputs only: no hourly/vendor prices or private account rows."""
+    variants = report.get("results")
+    if variants is None:
+        return None  # compatibility with earlier summary-only evidence tests
+    if not isinstance(variants, list) or not 0 < len(variants) <= 64:
+        raise ValueError("INVALID_DURABLE_EXPERIMENT_COUNT")
+    if len(variants) != report.get("experiment_count"):
+        raise ValueError("EXPERIMENT_COUNT_CONFLICT")
+    if len({item.get("id") for item in variants}) != len(variants):
+        raise ValueError("DUPLICATE_EXPERIMENT_ID")
+    if any(item.get("paper_eligible") is not False
+           or item.get("forward_validated") is not False
+           or item.get("trade_authorized") is not False for item in variants):
+        raise ValueError("DURABLE_RESEARCH_MUST_NOT_AUTHORIZE_TRADING")
+    source = report.get("source_zip_provenance", [])
+    if len(source) != len(MONTHS):
+        raise ValueError("DURABLE_MONTHLY_PROVENANCE_MISSING")
+    return {
+        "schema": STUDY_DETAIL_SCHEMA,
+        "strategy_policy": report["policy"],
+        "research_data_rights":"PERSONAL_NONCOMMERCIAL_RESEARCH_ONLY",
+        "historical_replay_is_not_first_seen_forward": True,
+        "source_zip_provenance": source,
+        "variants": variants,
+    }
+
+
 def append_ledger(path, report):
-    """Append-only SHA chain of summary-only decisions, not historical market ticks."""
+    """Append-only SHA chain, full *aggregated* per-variant research history.
+
+    The old 90-day artifact-only reports are NOT sufficiently durable. A
+    one-time enrichment of an unchanged source/policy is a metadata upgrade,
+    not a new market observation. Distinct outcomes for same source+policy
+    are rejected rather than silently rewriting the research record.
+    """
     path=Path(path)
     previous="GENESIS"
     prior=[]
@@ -364,27 +406,46 @@ def append_ledger(path, report):
                 raise ValueError("V5_RESEARCH_EVIDENCE_SHA_CHAIN_INVALID")
             previous=item["sha256"]
             prior.append(item)
-    # A run with the same source and policy is not a new observation,
-    # even if clock/capture changed. Never call retrospective replay forward.
-    if prior and (prior[-1]["source_archive_digest"]==report["source_archive_digest"]
-                  and prior[-1]["strategy_policy_hash"]==report["strategy_policy_hash"]):
-        return {"status":"UNCHANGED_SOURCE_NO_SYNTHETIC_NEW_OBSERVATION","records":len(prior)}
-    row={"schema":"eaverse.early_flow_ledger.v1",
-         "captured_utc":report["captured_utc"],
-         "source_archive_digest":report["source_archive_digest"],
-         "strategy_policy_hash":report["strategy_policy_hash"],
-         "asset":report["asset"],"experiment_count":report["experiment_count"],
-         "counts_by_decision":report["counts_by_decision"],
-         "source_revision": bool(prior and
-              prior[-1]["source_archive_digest"]!=report["source_archive_digest"]),
-         "forward_validated":False,"paper_eligible":False,
-         "prev_sha256":previous}
+    details=evidence_details(report)
+    study_sha=digest(details) if details is not None else None
+    same=bool(prior and (
+        prior[-1]["source_archive_digest"]==report["source_archive_digest"] and
+        prior[-1]["strategy_policy_hash"]==report["strategy_policy_hash"]))
+    upgrade=bool(same and details is not None and
+                 prior[-1].get("detailed_study_schema") != STUDY_DETAIL_SCHEMA)
+    if same and not upgrade:
+        old_hash=prior[-1].get("detailed_study_sha256")
+        if study_sha is not None and old_hash not in (None,study_sha):
+            raise ValueError("SAME_SOURCE_SAME_POLICY_OUTCOME_MISMATCH")
+        return {"status":"UNCHANGED_SOURCE_NO_SYNTHETIC_NEW_OBSERVATION",
+                "records":len(prior)}
+    row={
+        "schema":"eaverse.early_flow_ledger.v1",
+        "captured_utc":report["captured_utc"],
+        "source_archive_digest":report["source_archive_digest"],
+        "strategy_policy_hash":report["strategy_policy_hash"],
+        "asset":report["asset"],
+        "experiment_count":report["experiment_count"],
+        "counts_by_decision":report["counts_by_decision"],
+        "source_revision":bool(prior and
+             prior[-1]["source_archive_digest"]!=report["source_archive_digest"]),
+        "same_source_study_enrichment_not_new_market_observation":upgrade,
+        "detailed_study_schema":STUDY_DETAIL_SCHEMA if details else None,
+        "detailed_study_sha256":study_sha,
+        "full_aggregate_study":details,
+        "forward_validated":False,
+        "paper_eligible":False,
+        "prev_sha256":previous,
+    }
     row["sha256"]=digest(row)
     path.parent.mkdir(parents=True,exist_ok=True)
     with path.open("a",encoding="utf-8") as stream:
         stream.write(json.dumps(row,sort_keys=True,allow_nan=False)+"\n")
-    return {"status":"APPENDED_RESEARCH_RETROSPECTIVE_ONLY",
-            "records":len(prior)+1,"sha256":row["sha256"]}
+    return {
+        "status":("APPENDED_DETAIL_ENRICHMENT_NOT_NEW_MARKET_OBSERVATION" if upgrade
+                  else "APPENDED_RESEARCH_RETROSPECTIVE_ONLY"),
+        "records":len(prior)+1,"sha256":row["sha256"],
+    }
 
 
 def main():
