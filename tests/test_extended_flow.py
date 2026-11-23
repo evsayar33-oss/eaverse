@@ -18,7 +18,7 @@ import pandas as pd
 from eaverse import early_flow, extended_flow, pit_binance_pilot
 
 
-def csv_month(month, *, gap=False, invalid=False):
+def csv_month(month, *, gap=False, invalid=False, real_2023_halt=False):
     y, m=map(int,month.split("-"))
     start=pd.Timestamp(f"{y}-{m:02d}-01T00:00:00Z")
     end=start+pd.offsets.MonthBegin(1)
@@ -26,9 +26,13 @@ def csv_month(month, *, gap=False, invalid=False):
     for hour in pd.date_range(start,end-pd.Timedelta(hours=1),freq="h"):
         if gap and hour.day==15 and hour.hour==8:
             continue
+        if real_2023_halt and month=="2023-03" and hour==pd.Timestamp("2023-03-24T13:00:00Z"):
+            continue
         unit=1_000_000 if y>=2025 else 1000
         begin=int(hour.timestamp()*unit)
         close=begin+3600*unit-1
+        if real_2023_halt and month=="2023-03" and hour==pd.Timestamp("2023-03-24T12:00:00Z"):
+            close=begin+40*60*unit-1
         volume=100.
         taker_buy=60.
         if invalid and hour.day==3 and hour.hour==8:
@@ -42,6 +46,7 @@ def csv_month(month, *, gap=False, invalid=False):
 
 def fake_bars():
     dates=pd.date_range("2023-01-01T00:00:00Z","2025-12-31T23:00:00Z",freq="h")
+    dates=dates[~dates.isin(extended_flow.MAINTENANCE_UTC)]
     n=len(dates)
     t=np.arange(n)
     opened=100.+.2*np.sin(t*.009)
@@ -75,11 +80,49 @@ class ExtendedFlowTests(unittest.TestCase):
     def test_continuity_and_epoch_units(self):
         blobs={m:csv_month(m) for m in extended_flow.MONTHS}
         bars=extended_flow._verified_months(blobs,"SOLUSDT")
-        self.assertEqual(len(bars),26304)
+        self.assertEqual(len(bars),26302)
         self.assertEqual(bars.index[-1].isoformat(),"2025-12-31T23:00:00+00:00")
         blobs["2025-08"]=csv_month("2025-08",gap=True)
-        with self.assertRaisesRegex(ValueError,"MISSING_EXTRA"):
+        with self.assertRaisesRegex(ValueError,"UNEXPLAINED_HOURLY_GAP_OR_EXTRA_BAR"):
             extended_flow._verified_months(blobs,"SOLUSDT")
+
+
+    def test_official_2023_exchange_halt_has_no_synthetic_hour_or_fill(self):
+        raw=csv_month("2023-03",real_2023_halt=True)
+        normalized, count=extended_flow._remove_documented_exchange_blackout(raw)
+        self.assertEqual(count,1)
+        rows=early_flow._hourly_csv(normalized,"BTCUSDT","2023-03")
+        self.assertEqual(len(rows),742)
+        index=pd.DatetimeIndex([row[0] for row in rows])
+        self.assertNotIn(pd.Timestamp("2023-03-24T12:00:00Z"),index)
+        self.assertNotIn(pd.Timestamp("2023-03-24T13:00:00Z"),index)
+
+    def test_full_dataset_accepts_only_official_halt(self):
+        blobs={m:csv_month(m,real_2023_halt=(m=="2023-03"))
+               for m in extended_flow.MONTHS}
+        bars=extended_flow._verified_months(blobs,"ETHUSDT")
+        self.assertEqual(len(bars),26302)
+        self.assertEqual(bars.attrs["excluded_source_rows_during_official_maintenance"],1)
+        self.assertEqual(len(bars.attrs["documented_nontradable_hours"]),2)
+        outside=pd.Timestamp("2023-03-25T14:00:00Z")
+        lines=blobs["2023-03"].decode().splitlines()
+        lines=[row for row in lines if int(row.split(",")[0])!=int(outside.timestamp()*1000)]
+        blobs["2023-03"]=("\n".join(lines)+"\n").encode()
+        with self.assertRaisesRegex(ValueError,"UNEXPLAINED_HOURLY_GAP"):
+            extended_flow._verified_months(blobs,"ETHUSDT")
+
+    def test_halt_guard_blocks_signals_across_outage_warmup(self):
+        bars=fake_bars()
+        feat=extended_flow._apply_halt_guard(early_flow.asof_features(bars))
+        blocked=(bars.index>=extended_flow.GUARD_FROM)&(
+                 bars.index<=extended_flow.GUARD_THROUGH)
+        self.assertGreater(int(blocked.sum()),168)
+        self.assertFalse(feat.loc[blocked,"quiet"].any())
+        for family in extended_flow.FAMILIES:
+            for direction in extended_flow.DIRECTIONS:
+                mask=extended_flow.event_mask(bars,feat,family,direction)
+                self.assertFalse(mask[blocked].any(),
+                                 msg=f"Outage contamination: {family} {direction}")
 
     def test_official_zip_sha_verified_for_entire_historical_window(self):
         blobs={}
@@ -98,7 +141,7 @@ class ExtendedFlowTests(unittest.TestCase):
             self.assertLessEqual(len(blobs[url]),limit)
             return blobs[url]
         bars, evidence=extended_flow.download("XRPUSDT",fetch)
-        self.assertEqual(len(bars),26304)
+        self.assertEqual(len(bars),26302)
         self.assertEqual(len(evidence),36)
         self.assertTrue(all(x["checksum_verified"] for x in evidence))
         # Fail closed on one tampered official signature.
@@ -134,7 +177,7 @@ class ExtendedFlowTests(unittest.TestCase):
         report=extended_flow.analyze(
             bars,manifests("AVAXUSDT"),"AVAXUSDT",
             captured_utc="2026-11-23T09:00:00Z")
-        self.assertEqual(report["hours"],26304)
+        self.assertEqual(report["hours"],26302)
         self.assertEqual(report["archive_months"],36)
         self.assertEqual(report["hypothesis_count"],64)
         self.assertEqual(len({x["id"] for x in report["results"]}),64)
