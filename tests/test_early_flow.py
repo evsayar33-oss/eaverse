@@ -153,6 +153,13 @@ class HourlyResearchTests(unittest.TestCase):
                 self.assertEqual(exp["folds"]["untouched_holdout"]["data_status"],
                                  "SEALED_UNTIL_PRESELECTION_PASSES")
                 self.assertIsNone(exp["folds"]["untouched_holdout"]["cases_nonoverlapping"])
+            if exp["direction"]=="LONG_TIMING":
+                for f in ("discovery","validation"):
+                    data=exp["folds"][f]
+                    if data["mean_case_after_stressed_fees_bps"] is not None:
+                        self.assertGreaterEqual(data["mean_case_after_base_fees_bps"],
+                                                data["mean_case_after_stressed_fees_bps"])
+                        self.assertEqual(data["base_cost_bps_round_trip_assumption"],24.0)
             if exp["direction"]=="RISK_AVOIDANCE_NOT_SHORT":
                 self.assertIsNone(exp["folds"]["validation"]["mean_case_after_stressed_fees_bps"])
             if exp["decision"].startswith("EXPLORATORY"):
@@ -174,6 +181,45 @@ class HourlyResearchTests(unittest.TestCase):
             "SEALED_UNTIL_PRESELECTION_PASSES"
             for item in result["results"]
         ))
+
+    def test_full_variant_history_is_durable_and_one_time_upgraded(self):
+        import copy
+        report={"captured_utc":"2026-11-23T12:00:00Z",
+                "source_archive_digest":"immutable24zip",
+                "strategy_policy_hash":"frozen-policy",
+                "asset":"BTCUSDT",
+                "experiment_count":32,
+                "counts_by_decision":{"HOLDOUT_SEALED":32}}
+        variants=[{"id":f"hyp-{i}","decision":"HOLDOUT_SEALED",
+                   "folds":{"discovery":{"cases_nonoverlapping":17},
+                            "validation":{"cases_nonoverlapping":12},
+                            "untouched_holdout":{"data_status":
+                                                 "SEALED_UNTIL_PRESELECTION_PASSES"}},
+                   "paper_eligible":False,"forward_validated":False,
+                   "trade_authorized":False} for i in range(32)]
+        detailed={**report,"policy":{"time_split":"frozen_50_25_25"},
+                  "source_zip_provenance":[{"month":m,"zip_sha256":"a"*64,
+                                            "csv_sha256":"b"*64}
+                                           for m in early_flow.MONTHS],
+                  "results":variants}
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"research.jsonl"
+            legacy=early_flow.append_ledger(path,report)
+            self.assertEqual(legacy["records"],1)
+            enriched=early_flow.append_ledger(path,detailed)
+            self.assertIn("ENRICHMENT_NOT_NEW_MARKET",enriched["status"])
+            self.assertEqual(enriched["records"],2)
+            rows=[json.loads(s) for s in path.read_text().splitlines()]
+            self.assertTrue(rows[-1]["same_source_study_enrichment_not_new_market_observation"])
+            self.assertEqual(rows[-1]["detailed_study_schema"],
+                             early_flow.STUDY_DETAIL_SCHEMA)
+            self.assertEqual(len(rows[-1]["full_aggregate_study"]["variants"]),32)
+            self.assertFalse(rows[-1]["forward_validated"])
+            self.assertEqual(early_flow.append_ledger(path,detailed)["records"],2)
+            forged=copy.deepcopy(detailed)
+            forged["results"][0]["folds"]["validation"]["cases_nonoverlapping"]=999
+            with self.assertRaisesRegex(ValueError,"SAME_SOURCE_SAME_POLICY_OUTCOME_MISMATCH"):
+                early_flow.append_ledger(path,forged)
 
     def test_metadata_ledger_chain_dedup_and_tamper(self):
         report={"captured_utc":"2026-11-23T12:00:00Z",
