@@ -63,7 +63,12 @@ yakın aktiviteye sahip** sakin piyasa örneklerinden seçilir.
 ## 4. Doğrulama ve karar mantığı
 
 Kronolojik keşif/doğrulama/dokunulmamış test: 50/25/25.
-En uzun 24h ufuk için 25 saat embargo. Bir sinyal,
+En uzun 24h ufuk için 25 saat embargo. **Holdout başlangıçta kilitlidir:**
+önce keşif ve doğrulama örnek sayıları, aynı saat kontrolleri ve maliyet
+sonrası sonuçları geçmeden holdout getirisi hesaplanıp aday seçiminde
+kullanılamaz. Yalnız önceden belirlenmiş ilk iki aşama koşulunu geçen
+hipotez için ayrılmış son dönem bir kez açılır. Bu bile geçmiş testtir,
+gerçek prospective forward kanıtı değildir. Bir sinyal,
 kapanmış saatlik mum sonunda üretilebilir; yalnızca sonraki
 saat açılışından sonraki 1/4/12/24 saat getirisi ölçülür.
 Sinyal pencerelerinin birbiriyle iç içe geçtiği araştırma
