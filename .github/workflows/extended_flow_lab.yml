@@ -140,9 +140,9 @@ jobs:
           import json, os
           z=json.load(open("out/extended_flow/statistical_audit.json"))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              f.write("\\nStatistical evidence: " + z["status"] +
+              f.write("\nStatistical evidence: " + z["status"] +
                       "; missing proofs: " + str(len(z["missing_proofs"])) +
-                      "; no PAPER/LIVE promotion.\\n")
+                      "; no PAPER/LIVE promotion.\n")
           PY
       - name: Persist complete aggregated source and strategy study, never vendor data
         shell: bash
