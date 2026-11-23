@@ -209,11 +209,22 @@ def _matched_prior_control(idx, features, active, event_i, horizon, first):
     return None
 
 
-def _evaluate_one(bars, feat, family, direction, horizon, split):
+def _evaluate_one(bars, feat, family, direction, horizon, split, *, open_holdout=False):
     opens = bars.open.to_numpy()
     active = flags(feat, family, direction)
     result = {}
     for name,(first,last) in split.items():
+        if name == 'untouched_holdout' and not open_holdout:
+            result[name] = {
+                'data_status': 'SEALED_UNTIL_PRESELECTION_PASSES',
+                'minimum_sample_satisfied': False,
+                'required_cases': MIN_CASES[name],
+                'first_utc': bars.index[first].isoformat(),
+                'last_utc': bars.index[last].isoformat(),
+                'cases_nonoverlapping': None,
+                'prior_same_hour_controls': None,
+            }
+            continue
         selected, controls = [], []
         previous = first-horizon-1
         for i in range(first,last-horizon-1):
@@ -262,23 +273,54 @@ def analyze(bars: pd.DataFrame, provenance: list, symbol: str, *, captured_utc: 
     for family in FAMILIES:
         for direction in DIRECTIONS:
             for horizon in HORIZONS:
+                # The untouched holdout is not even READ before frozen
+                # discovery/validation screening has passed.
                 study=_evaluate_one(bars,feat,family,direction,horizon,split)
-                adequate=all(item["minimum_sample_satisfied"] for item in study.values())
-                # Even robust retrospective folds are not forward/PAPER admission.
+                earlier=(study["discovery"],study["validation"])
+                adequate=all(
+                    s["minimum_sample_satisfied"] and
+                    s["mean_matched_lift_bps"] is not None
+                    for s in earlier
+                )
+                # The decision to OPEN the holdout uses zero holdout
+                # prices/returns and no ex-post threshold optimization.
                 if not adequate:
-                    decision="DEFER_MORE_INDEPENDENT_CASES"
-                elif (direction>0 and
-                      all(study[k]["mean_case_after_stressed_fees_bps"]>0
-                          for k in ("validation","untouched_holdout")) and
-                      all((study[k]["mean_matched_lift_bps"] or float("-inf"))>0
-                          for k in ("validation","untouched_holdout"))):
-                    decision="EXPLORATORY_FORWARD_RESEARCH_CANDIDATE_NOT_PAPER"
+                    decision="DEFER_MORE_INDEPENDENT_CASES_OR_CONTROLS"
+                elif direction==1:
+                    validated=all(
+                        s["mean_case_after_stressed_fees_bps"]>0 and
+                        s["mean_matched_lift_bps"]>0 for s in earlier)
+                    decision=("PRESELECTION_FAILED_AFTER_COST"
+                              if not validated else "VALIDATION_PASSED_OPENING_HOLDOUT")
                 else:
-                    decision="NO_REPLICATED_AFTER_COST_EDGE_OR_DOWNSIDE_DIAGNOSTIC"
+                    validated=all(
+                        s["mean_signed_gross_bps"]>0 and
+                        s["mean_matched_lift_bps"]>0 for s in earlier)
+                    decision=("RISK_AVOIDANCE_PRESELECTION_FAILED"
+                              if not validated else "VALIDATION_PASSED_OPENING_HOLDOUT")
+                opened=bool(adequate and validated)
+                if opened:
+                    study=_evaluate_one(bars,feat,family,direction,horizon,split,
+                                        open_holdout=True)
+                    hold=study["untouched_holdout"]
+                    if (not hold["minimum_sample_satisfied"] or
+                        hold["mean_matched_lift_bps"] is None):
+                        decision="HOLDOUT_INSUFFICIENT_CASES_OR_CONTROLS"
+                    elif direction==1:
+                        decision=("EXPLORATORY_FORWARD_RESEARCH_CANDIDATE_NOT_PAPER"
+                                  if (hold["mean_case_after_stressed_fees_bps"]>0
+                                      and hold["mean_matched_lift_bps"]>0)
+                                  else "INDEPENDENT_HOLDOUT_FAILED_AFTER_COST")
+                    else:
+                        decision=("RISK_AVOIDANCE_HOLDOUT_HYPOTHESIS_NOT_EXECUTABLE_SHORT"
+                                  if (hold["mean_signed_gross_bps"]>0
+                                      and hold["mean_matched_lift_bps"]>0)
+                                  else "RISK_AVOIDANCE_HOLDOUT_NOT_REPLICATED")
                 cases.append({
                     "id":digest([SCHEMA,symbol,family,direction,horizon]),
                     "family":family,"direction":"LONG_TIMING" if direction==1 else "RISK_AVOIDANCE_NOT_SHORT",
                     "horizon_hours":horizon,
+                    "holdout_opened_only_after_discovery_validation":opened,
                     "folds":study,"decision":decision,
                     "forward_validated":False,"paper_eligible":False,"trade_authorized":False,
                 })
@@ -290,6 +332,7 @@ def analyze(bars: pd.DataFrame, provenance: list, symbol: str, *, captured_utc: 
         "pre_price_definition":"signal at fully closed 1h bar with abs bar return <=0.4pct; NO PRICE BREAKOUT REQUIRED",
         "entry":"NEXT_HOURLY_OPEN","exit":"h_hours_later_open",
         "no_hindsight_threshold_search":True,"time_split":"50pct_25pct_25pct_with_25h_embargo",
+        "holdout_access_rule":"sealed unless discovery and validation pass sample, controls and cost; never selection on holdout",
         "source_archive_revisions_reconstruct_past_first_seen":False,
         "total_multiple_trials":len(cases),"multiple_testing_adjusted_alpha_proven":False}
     source_summary=[{"month":p["month"],"zip_sha256":p["zip_sha256"],
