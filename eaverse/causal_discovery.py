@@ -9,7 +9,7 @@ import hashlib
 import itertools
 import json
 from pathlib import Path
-from . import source_council, extended_flow
+from . import source_council, extended_flow, research_integrity
 
 SCHEMA="eaverse.causal_discovery_queue.v8"
 # Asset membership here is a frozen research universe, not a point-in-time
@@ -182,6 +182,9 @@ def designs():
                 "live_allowed":False,
             }
             hypothesis["id"]=digest(hypothesis)[:24]
+            # V9: candidate generation does NOT mean source, delist,
+            # publication, revision, L2 or prospective proof exists.
+            hypothesis["integrity_preflight"]=research_integrity.preflight(hypothesis)
             results.append(hypothesis)
     if len(results)>MAX_DESIGNS or len({x["id"] for x in results})!=len(results):
         raise ValueError("UNBOUNDED_OR_DUPLICATE_DISCOVERY_QUEUE")
@@ -198,6 +201,11 @@ def report():
         "designs":proposals,
         "by_market":{m:sum(x["market"]==m for x in proposals) for m in ASSETS},
         "new_backtests_completed":0,
+        "integrity_gate_schema":research_integrity.SCHEMA,
+        "no_source_qualified_by_design_only":all(
+            not item["integrity_preflight"]["research_ready"] for item in proposals),
+        "integrity_blocked_hypotheses":sum(
+            not item["integrity_preflight"]["research_ready"] for item in proposals),
         "new_paper_approvals":0,
         "live_authorized":False,
         "not_a_search_for_profitable_results":True,
