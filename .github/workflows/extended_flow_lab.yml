@@ -13,6 +13,8 @@ on:
       - 'tests/test_extended_flow.py'
       - 'tests/test_source_council.py'
       - 'tests/test_cross_venue_reference.py'
+      - 'eaverse/statistical_audit.py'
+      - 'tests/test_statistical_audit.py'
   pull_request:
     paths:
       - '.github/workflows/extended_flow_lab.yml'
@@ -23,6 +25,8 @@ on:
       - 'tests/test_extended_flow.py'
       - 'tests/test_source_council.py'
       - 'tests/test_cross_venue_reference.py'
+      - 'eaverse/statistical_audit.py'
+      - 'tests/test_statistical_audit.py'
       - 'docs/EAVERSE_V7_RESEARCH_FOUNDRY_TR.md'
   schedule:
     - cron: '37 6 * * 2'
@@ -127,6 +131,19 @@ jobs:
                   f.write(f"- {name}: {count}\n")
               f.write("\nNo historical replay is new prospective data, PAPER or LIVE authorization.\n")
           PY
+      - name: Audit statistical limitations without inventing PBO or trading eligibility
+        run: |
+          python -m eaverse.statistical_audit \
+            --report out/extended_flow/report.json \
+            --out out/extended_flow/statistical_audit.json
+          python - <<'PY'
+          import json, os
+          z=json.load(open("out/extended_flow/statistical_audit.json"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\\nStatistical evidence: " + z["status"] +
+                      "; missing proofs: " + str(len(z["missing_proofs"])) +
+                      "; no PAPER/LIVE promotion.\\n")
+          PY
       - name: Persist complete aggregated source and strategy study, never vendor data
         shell: bash
         run: |
@@ -145,7 +162,9 @@ jobs:
         if: always()
         with:
           name: eaverse-v7-${{ matrix.symbol }}-${{ github.run_id }}
-          path: out/extended_flow/report.json
+          path: |
+            out/extended_flow/report.json
+            out/extended_flow/statistical_audit.json
           if-no-files-found: warn
           retention-days: 90
 
