@@ -70,7 +70,7 @@ class EquitySourceAssuranceTests(unittest.TestCase):
         lines.append(lines[1])
         result=eql.vix_coverage(b"\n".join(lines)+b"\n")
         self.assertEqual(result["duplicate_date_rows"],1)
-        self.assertEqual(result["rows"],len(lines)-2)
+        self.assertEqual(result["rows"],len(lines)-3)  # original day plus duplicate excluded
         self.assertFalse(result["historical_full_ohlc_replay_verified"])
         self.assertFalse(result["pit_factor_approved_for_paper"])
 
