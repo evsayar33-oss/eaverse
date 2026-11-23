@@ -210,9 +210,11 @@ def _matched_prior_control(idx, features, active, event_i, horizon, first):
     return None
 
 
-def _evaluate_one(bars, feat, family, direction, horizon, split, *, open_holdout=False):
+def _evaluate_one(bars, feat, family, direction, horizon, split, *, open_holdout=False, active_override=None):
     opens = bars.open.to_numpy()
-    active = flags(feat, family, direction)
+    active = flags(feat, family, direction) if active_override is None else np.asarray(active_override, dtype=bool)
+    if len(active) != len(bars):
+        raise ValueError("override event flags do not align with source bars")
     result = {}
     for name,(first,last) in split.items():
         if name == 'untouched_holdout' and not open_holdout:
