@@ -83,7 +83,7 @@ class ExtendedFlowTests(unittest.TestCase):
         self.assertEqual(len(bars),26302)
         self.assertEqual(bars.index[-1].isoformat(),"2025-12-31T23:00:00+00:00")
         blobs["2025-08"]=csv_month("2025-08",gap=True)
-        with self.assertRaisesRegex(ValueError,"MISSING_EXTRA"):
+        with self.assertRaisesRegex(ValueError,"UNEXPLAINED_HOURLY_GAP_OR_EXTRA_BAR"):
             extended_flow._verified_months(blobs,"SOLUSDT")
 
 
