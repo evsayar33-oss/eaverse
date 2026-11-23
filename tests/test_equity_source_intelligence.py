@@ -57,8 +57,32 @@ class EquitySourceAssuranceTests(unittest.TestCase):
         segments=rows[1].decode().split(",")
         segments[2]="0"
         rows[1]=",".join(segments).encode()
-        with self.assertRaisesRegex(ValueError,"INCONSISTENT"):
-            eql.vix_coverage(b"\n".join(rows)+b"\n")
+        sample=eql.vix_coverage(b"\n".join(rows)+b"\n")
+        self.assertEqual(sample["ohlc_anomaly_rows"],1)
+        self.assertEqual(sample["invalid_close_rows"],0)
+        self.assertTrue(sample["historical_close_coverage_present"])
+        self.assertFalse(sample["historical_full_ohlc_replay_verified"])
+        self.assertFalse(sample["pit_factor_approved_for_paper"])
+        self.assertIn("ANOMALIES",sample["status"])
+
+    def test_vix_duplicate_dates_never_create_extra_observation(self):
+        lines=vix_sample().splitlines()
+        lines.append(lines[1])
+        result=eql.vix_coverage(b"\n".join(lines)+b"\n")
+        self.assertEqual(result["duplicate_date_rows"],1)
+        self.assertEqual(result["rows"],len(lines)-2)
+        self.assertFalse(result["historical_full_ohlc_replay_verified"])
+        self.assertFalse(result["pit_factor_approved_for_paper"])
+
+    def test_vix_invalid_close_is_not_used_as_future_regime_value(self):
+        lines=vix_sample().splitlines()
+        segments=lines[4].decode().split(",")
+        segments[4]="0"
+        lines[4]=",".join(segments).encode()
+        report=eql.vix_coverage(b"\n".join(lines)+b"\n")
+        self.assertEqual(report["invalid_close_rows"],1)
+        self.assertFalse(report["historical_full_ohlc_replay_verified"])
+        self.assertFalse(report["pit_factor_approved_for_paper"])
 
     def test_bist_membership_exclusive_tier_and_unpublished_snapshot(self):
         raw=bist_sample()
