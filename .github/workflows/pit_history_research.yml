@@ -1,0 +1,77 @@
+name: Eaverse PIT historical research (NO ORDERS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: Repo-relative SHA-pinned research manifest (never a production input)
+        required: false
+        default: research/pit_inputs/manifest.json
+  push:
+    branches: [main]
+    paths:
+      - eaverse/pit_research.py
+      - eaverse/pit_adapters.py
+      - tests/test_pit_research.py
+      - .github/workflows/pit_history_research.yml
+      - research/pit_inputs/**
+  pull_request:
+    paths:
+      - eaverse/pit_research.py
+      - eaverse/pit_adapters.py
+      - tests/test_pit_research.py
+      - .github/workflows/pit_history_research.yml
+      - docs/EAVERSE_PIT_HISTORY_RESEARCH_TR.md
+  schedule:
+    - cron: '19 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eaverse-pit-history-research
+  cancel-in-progress: false
+
+jobs:
+  pit-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing native research dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test source publication clocks and independent chronological folds
+        run: python -m unittest discover -s tests -p 'test_pit_research.py' -v
+      - name: Replay actual SHA-pinned data ONLY when explicitly present
+        if: github.event_name != 'pull_request'
+        env:
+          EAVERSE_PIT_MANIFEST: ${{ github.event.inputs.manifest || 'research/pit_inputs/manifest.json' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$EAVERSE_PIT_MANIFEST" ]; then
+            python -m eaverse.pit_research --manifest "$EAVERSE_PIT_MANIFEST" --out out/eaverse_pit_replay.json
+            python - <<'PY'
+          import json, os
+          x = json.load(open("out/eaverse_pit_replay.json"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"### Eaverse retrospective PIT replay\n\nMarket: {x['market']} / Asset: {x['asset']}\n\n")
+              f.write(f"Historical events: {x['events']}; variants: {x['variants']}\n\n")
+              f.write("**NO PAPER/LIVE APPROVAL. NO FORWARD EVIDENCE.**\n")
+          PY
+          else
+            echo 'NO_VERIFIED_HISTORICAL_INPUT: No manifest checked into research/pit_inputs; offline integrity tests only. This is NOT a historical backtest.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Publish independent research-only evidence
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eaverse-pit-research-${{ github.run_id }}
+          path: out/eaverse_pit_replay.json
+          if-no-files-found: ignore
+          retention-days: 90
