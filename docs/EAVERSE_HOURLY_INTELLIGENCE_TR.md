@@ -77,7 +77,7 @@ Sinyal pencerelerinin birbiriyle iç içe geçtiği araştırma
 Kıyas: aynı saatte sakin piyasa, gözlem sayısı, yönlü isabet,
 olay başına bps ve uygun kontrol sayısı. Binance spot long
 için maliyet varsayımı tek yönde 12 bps (ücret+kayma),
-iki kat stresle gidiş dönüş toplam **48 bps**; ücret gerçek
+baz senaryoda toplam **24 bps**, iki kat stresle gidiş dönüş toplam **48 bps**; ücret gerçek
 müşteri hesabı/fill değil deney varsayımıdır. Aşağı yönlü
 bulgu, Binance spot üzerinde açılmış vadeli short diye
 etiketlenmez: yalnız **riskten kaçınma yönlü tanılama**dır.
@@ -102,9 +102,17 @@ research/eaverse-hourly-btcusdt-evidence veya
 research/eaverse-hourly-ethusdt-evidence kanıt dalında
 SHA bağlantılı özetler olarak biriktirilir. Ham veriler
 piyasa veri lisansına uymak için bu dallara taşınmaz.
-Artifaktlar 90 gün saklanır. Aynı kaynak SHA + aynı
-hipotez politikası yeniden çalıştığında yeni gözlem
-oluşmaz, kaynak revizyonu ayrı etiketlenir.
+Artifaktlar 90 gün saklanır. Ancak **kalıcı kanıt dalında** ayrıca
+her varyantın dört açıklamalı karar alanı, ayrı fold kayıt sayıları,
+karşılaştırma örnekleri, hem baz hem stresli masraf sonuçları, aday
+ID'si, sealed holdout durumu, tam sabit hipotez politikası ve
+orijinal arşiv SHA listesi korunur. Bu özetler, ham fiyat/tick veya
+müşteri portföy kayıtları değildir. Sonradan eklenen ayrıntılı
+şema, aynı kaynak üstüne bir defalık ``metadata enrichment`` kaydı
+olarak yazılır; **yeni piyasa örneği** sayılmaz. Aynı kaynak ve aynı
+hipotez versiyonunda farklı test sonuçları tespit edilirse fail-closed
+durur. Aynı kaynak SHA + aynı hipotez politikası yeniden çalıştığında
+yeni gözlem oluşmaz, kaynak revizyonu ayrı etiketlenir.
 
 ## 6. Henüz tamamlanmayan kaynaklar
 
