@@ -65,12 +65,25 @@ def get(url, limit=MAX_SOURCE_BYTES, agent=None):
 
 
 def vix_coverage(raw):
-    """Date-only retrospective close series: NEVER a same-session signal."""
+    """Official date-only VIX CLOSE diagnostics; reject false OHLC/PIT claims.
+
+    Several historical publisher OHLC records can be inconsistent while the
+    closing VIX value is valid. Do not silently repair OHLC or use invalid
+    HIGH/LOW for intraday fill claims. Keep exact integrity counters and SHA.
+    """
     reader=csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
     fields=set(reader.fieldnames or [])
     if not {"DATE","OPEN","HIGH","LOW","CLOSE"}.issubset(fields):
         raise ValueError("VIX_COLUMN_SCHEMA_MISSING")
-    rows={}
+    closes={}
+    duplicated=set()
+    count=0
+    anomalies=0
+    bad_close=0
+    repeated=0
+    order_errors=0
+    last_date=None
+    first_bad_dates=[]
     for record in reader:
         label=record["DATE"].strip()
         try:
@@ -79,29 +92,60 @@ def vix_coverage(raw):
             opn,hi,lo,close=(float(record[k]) for k in ("OPEN","HIGH","LOW","CLOSE"))
         except (TypeError,ValueError,KeyError) as exc:
             raise ValueError("INVALID_HISTORICAL_VIX_ROW") from exc
-        if (date in rows or not all(math.isfinite(x) for x in (opn,hi,lo,close))
-            or not 0<lo<=min(opn,close)<=hi<300):
-            raise ValueError("INVALID_DUPLICATE_OR_INCONSISTENT_VIX")
-        rows[date]=close
-        if len(rows)>MAX_ROWS:
+        count+=1
+        if count>MAX_ROWS:
             raise ValueError("VIX_SOURCE_TOO_MANY_ROWS")
-    dates=sorted(rows)
-    if (len(dates)<6000 or dates[0].year>1994 or
-        dates[-1].year<2025 or dates!=list(rows)):
-        raise ValueError("VIX_HISTORICAL_COVERAGE_OR_SEQUENCE_INCOMPLETE")
+        if last_date is not None and date<=last_date:
+            order_errors+=1
+        last_date=date
+        # Duplicated date is ambiguous, even when repeated CLOSE matches:
+        # it cannot be an additional independent historical observation.
+        if date in closes or date in duplicated:
+            repeated+=1
+            duplicated.add(date)
+            closes.pop(date,None)
+            if len(first_bad_dates)<6:
+                first_bad_dates.append(date.isoformat())
+            continue
+        if not math.isfinite(close) or not 0<close<300:
+            bad_close+=1
+            if len(first_bad_dates)<6:
+                first_bad_dates.append(date.isoformat())
+            continue
+        closes[date]=close
+        # Allow close-only historical coverage, but never call the
+        # entire daily OHLC feed "validated" if it is not physically sane.
+        if (not all(math.isfinite(x) for x in (opn,hi,lo,close))
+            or not 0<lo<=min(opn,close)<=hi<300):
+            anomalies+=1
+            if len(first_bad_dates)<6:
+                first_bad_dates.append(date.isoformat())
+    dates=sorted(closes)
+    if not dates or len(dates)<6000 or dates[0].year>1994 or dates[-1].year<2025:
+        raise ValueError("VIX_HISTORICAL_CLOSE_COVERAGE_INSUFFICIENT")
     spikes=Counter()
     previous=None
     for date in dates:
-        close=rows[date]
+        close=closes[date]
         for threshold in VIX_FIXED_THRESHOLDS:
             if previous is not None and previous<threshold<=close:
                 spikes[f"cross_above_{threshold}"]+=1
         previous=close
+    suspect=bool(anomalies or bad_close or repeated or order_errors)
     return {
-        "status":"OFFICIAL_HISTORICAL_DAILY_VIX_FORMAT_VERIFIED",
-        "rows":len(dates),"first_date":dates[0].isoformat(),
-        "last_date":dates[-1].isoformat(),
+        "status":("OFFICIAL_VIX_CLOSE_HISTORY_HAS_OHLC_OR_DUPLICATE_ANOMALIES"
+                  if suspect else "OFFICIAL_HISTORICAL_DAILY_VIX_FORMAT_VERIFIED"),
+        "raw_source_rows":count,"rows":len(dates),
+        "first_date":dates[0].isoformat(),"last_date":dates[-1].isoformat(),
+        "ohlc_anomaly_rows":anomalies,
+        "invalid_close_rows":bad_close,
+        "duplicate_date_rows":repeated,
+        "nonchronological_source_rows":order_errors,
+        "first_ambiguous_dates_only":first_bad_dates,
+        "historical_close_coverage_present":True,
+        "historical_full_ohlc_replay_verified":not suspect,
         "fixed_regime_crossings":dict(spikes),
+        "fixed_regime_crossings_are_retrospective_close_only":True,
         "signal_availability_rule":"NEXT_SESSION_OR_LATER_ONLY",
         "original_date_only_archive_revisions_verified":False,
         "publication_clock_exactly_verified":False,
