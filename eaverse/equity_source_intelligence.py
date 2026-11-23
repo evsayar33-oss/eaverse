@@ -32,6 +32,8 @@ SEC_CIKS=("0000320193","0000789019","0001045810")  # Apple, Microsoft, Nvidia
 SEC_BASE="https://data.sec.gov/submissions/CIK"
 MAX_SOURCE_BYTES=12_000_000
 MAX_ROWS=120_000
+MAX_SEC_ARCHIVE_SEGMENTS_PER_ISSUER=2
+SEC_ARCHIVE_FILENAME_RE=re.compile(r"^CIK(\\d{10})-submissions-(\\d{3})\\.json$")
 VIX_FIXED_THRESHOLDS=(25,35)
 SEC_AGENT_RE="^[^\\s]+(?:\\s+[^\\s]+)*\\s+[^\\s@]+@[^\\s@]+\\.[^\\s@]+$"
 
@@ -45,12 +47,16 @@ def sha(item):
 
 
 def get(url, limit=MAX_SOURCE_BYTES, agent=None):
-    if not (url==BIST_URL or url==VIX_URL or
+    sec_archive=SEC_ARCHIVE_FILENAME_RE.fullmatch(url.rsplit("/",1)[-1])
+    archive_allowed=(url.startswith("https://data.sec.gov/submissions/") and
+                     sec_archive is not None and sec_archive.group(1) in SEC_CIKS and
+                     url=="https://data.sec.gov/submissions/"+sec_archive.group(0))
+    if not (url==BIST_URL or url==VIX_URL or archive_allowed or
             url in {f"{SEC_BASE}{cik}.json" for cik in SEC_CIKS}):
         raise ValueError("UNREGISTERED_REMOTE_DATA_SOURCE")
     if limit>MAX_SOURCE_BYTES:
         raise ValueError("REMOTE_SOURCE_LIMIT_EXCEEDED")
-    if url.startswith(SEC_BASE):
+    if url.startswith(SEC_BASE) or archive_allowed:
         if not isinstance(agent,str) or not re.fullmatch(SEC_AGENT_RE,agent.strip()):
             raise ValueError("SEC_USER_AGENT_CONTACT_REQUIRED")
         identity=agent.strip()
@@ -162,6 +168,9 @@ def bist_coverage(raw):
         raise ValueError("BIST_MEMBERSHIP_SCHEMA_MISSING")
     rows=0
     tickers=set()
+    delisted_symbols=set()
+    unknown_delisted=0
+    invalid_delisted=0
     seen={}
     duplicated_keys=0
     conflicting_tier_keys=0
@@ -177,6 +186,13 @@ def bist_coverage(raw):
         if (not ticker or len(ticker)>30 or
             not re.fullmatch("[A-Z0-9.]+",ticker) or tier not in ("","XU030","XU050","XU100")):
             raise ValueError("BAD_BIST_TICKER_OR_EXCLUSIVE_TIER")
+        delist_label=str(record.get("delisted_in_year","")).strip().lower()
+        if delist_label in {"true","1","yes"}:
+            delisted_symbols.add(ticker)
+        elif delist_label not in {"false","0","no"}:
+            unknown_delisted+=1
+            if delist_label:
+                invalid_delisted+=1
         key=d,ticker
         if key in seen:
             duplicated_keys+=1
@@ -204,6 +220,10 @@ def bist_coverage(raw):
         "conflicting_tier_duplicate_rows":conflicting_tier_keys,
         "distinct_snapshot_symbol_keys":len(seen),
         "membership_rows":rows,"unique_issuer_symbols":len(tickers),
+        "symbols_flagged_delisted_in_reconstructed_rows":len(delisted_symbols),
+        "rows_with_unknown_delisting_flag":unknown_delisted,
+        "rows_with_unrecognized_delisting_flag":invalid_delisted,
+        "delisting_labels_are_not_verified_delisting_event_clocks":True,
         "review_snapshots":len(dates),"complete_tier_snapshots":len(complete),
         "first_snapshot":min(dates),"latest_snapshot_date":max(dates),
         "last_full_30_20_50_snapshot":max(complete),
@@ -238,6 +258,90 @@ def sec_coverage(raw, cik, captured):
         "first_seen_is_actual_collector_utc":True,
         "independent_trading_alpha_proven":False,
     }
+
+
+def sec_archive_coverage(raw, cik, captured, getter, agent):
+    """Bounded historical SEC segments, preserving CIK and acceptance timestamps.
+
+    The current submissions listing announces older files; each fetched file
+    is independently SHA-256 recorded. This covers an issuer's filings, not
+    the old tradable ticker, share class, delisted prices, or PIT universe.
+    """
+    result=sec_coverage(raw,cik,captured)
+    root=json.loads(raw)
+    files=root.get("filings",{}).get("files",[])
+    if not isinstance(files,list):
+        raise ValueError("SEC_HISTORICAL_FILES_SCHEMA_INVALID")
+    result.update({
+        "historical_archive_files_declared":len(files),
+        "historical_archive_files_scanned":0,
+        "historical_archive_segments":[],
+        "historical_archive_complete_for_issuer":not bool(files),
+        "extra_distinct_historical_events":0,
+        "current_security_id_backdated":False,
+        "historic_security_delisting_and_prices_verified":False,
+        "archive_limit_segments_per_issuer":MAX_SEC_ARCHIVE_SEGMENTS_PER_ISSUER,
+    })
+    if not files:
+        return result
+    seen=set()
+    try:
+        recent=root["filings"]["recent"]
+        seen={str(x) for x in recent["accessionNumber"]}
+    except (TypeError,KeyError):
+        raise ValueError("SEC_RECENT_ACCESSION_REFERENCE_MISSING")
+    chronological=sorted(files,key=lambda r: (str(r.get("filingFrom","")),str(r.get("name",""))))
+    for row in chronological[:MAX_SEC_ARCHIVE_SEGMENTS_PER_ISSUER]:
+        name=row.get("name") if isinstance(row,dict) else None
+        match=SEC_ARCHIVE_FILENAME_RE.fullmatch(name or "")
+        if match is None or match.group(1)!=cik:
+            raise ValueError("SEC_HISTORICAL_FILENAME_CIK_MISMATCH")
+        endpoint="https://data.sec.gov/submissions/"+name
+        try:
+            blob=getter(endpoint,MAX_SOURCE_BYTES,agent)
+            data=json.loads(blob)
+            if not isinstance(data,dict):
+                raise ValueError("SEC_HISTORICAL_ARRAY_SCHEMA_INVALID")
+            original={
+                "cik":int(cik),
+                "filings":{"recent":data},
+            }
+            discovered=pit_adapters.sec_events(
+                original,asset=f"US:CIK{cik}",retrieved_utc=captured)
+            prior_ids=set(seen)
+            unique=[event for event in discovered if event["id"] not in prior_ids]
+            seen.update(event["id"] for event in discovered)
+            result["extra_distinct_historical_events"]+=len(unique)
+            result["historical_archive_segments"].append({
+                "file":name, "declared_from":row.get("filingFrom"),
+                "declared_to":row.get("filingTo"),
+                "source_sha256":hashlib.sha256(blob).hexdigest(),
+                "bytes":len(blob), "known_lagged_events":len(discovered),
+                "additional_unique_events":len(unique),
+                "earliest_event_eligible_utc":min(
+                    (x["public_at_utc"] for x in unique),default=None),
+                "status":"SOURCE_SEGMENT_VERIFIED_WITH_CONSERVATIVE_ACCEPTANCE_CLOCK",
+                "historical_ticker_mapping_verified":False,
+            })
+            result["historical_archive_files_scanned"]+=1
+        except (HTTPError,URLError,TimeoutError,OSError,UnicodeError,
+                json.JSONDecodeError,ValueError,TypeError,KeyError) as exc:
+            result["historical_archive_segments"].append({
+                "file":name,"status":"SEGMENT_UNAVAILABLE_OR_INVALID",
+                "failure_type":type(exc).__name__})
+            break
+    result["historical_archive_complete_for_issuer"]=(
+        len(files)<=MAX_SEC_ARCHIVE_SEGMENTS_PER_ISSUER and
+        result["historical_archive_files_scanned"]==len(files))
+    result["historical_archive_additional_files_fetched"]=(
+        result["historical_archive_files_scanned"]>0)
+    result["status"]=(
+        "SEC_RECENT_PLUS_BOUNDED_HISTORICAL_FILINGS_NOT_TICKER_PIT"
+        if result["historical_archive_files_scanned"]
+        else "SEC_RECENT_ONLY_HISTORICAL_SEGMENTS_BLOCKED")
+    result["original_publication_first_seen_reconstructed"]=False
+    result["full_delisted_stock_prices_or_returns"]=False
+    return result
 
 
 def _attempt(label, url, parser, getter, agent=None):
@@ -285,7 +389,8 @@ def audit(now=None, getter=get, sec_agent=None):
                 "publisher_url":url,"alpha_proven":False}
         else:
             sources[alias]=_attempt(alias,url,
-                lambda raw,cik=cik:sec_coverage(raw,cik,captured),
+                lambda raw,cik=cik:sec_archive_coverage(
+                    raw,cik,captured,getter,sec_agent),
                 getter,sec_agent)
     return {
         "schema":SCHEMA,"captured_utc":captured,
