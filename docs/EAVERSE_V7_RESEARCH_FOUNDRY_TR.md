@@ -9,9 +9,12 @@ bağımsız olarak Eaverse içinde çalışır.
 Binance Vision spot üzerinde BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT,
 BNBUSDT, ADAUSDT, LINKUSDT, AVAXUSDT önceden belirlenmiştir.
 2023–2025 döneminde her biri için **36 aylık 1h kaynak arşivi**
-denenecektir. Tam kapsam varsa 26.304 saat/varlık, toplam 210.432
-saat söz konusudur. Bunlar gerçekleşmiş indirme sayıları değil,
-gerekli doğrulama koşullarıdır.
+denenecektir. Resmi Binance spot 24 Mart 2023 tarihli 12:00–14:00 UTC
+kesintisi nedeniyle iki tam saat işlem görmemiştir. Normal 26.304
+saatlik zaman çizelgesinden yalnız bu **iki işlem dışı saat** çıkarılır:
+tam kaynak ve geçerli mum varsa 26.302/varlık, 8 varlıkta 210.416
+gerçek işlem gören saat vardır. Bunlar gerçekleşmiş indirme sayıları
+değil, doğrulanması gereken hedef kapsamdır.
 
 Aylık her orijinal ZIP için Binance'in aynı ada sahip SHA256
 CHECKSUM dosyası doğrulanır. UTC saat sıra ve boşluk, 2025
@@ -145,3 +148,38 @@ sessizce eklenmez. CROSS-VENUE yedek kaynak şimdilik
 veri sağlayıcısını değiştirmez. Gerçek hedge/fill,
 tam çok yıllı Kraken/OKX derinlik entegrasyonu
 ve tarihsel yayın-vintage kanıtı ayrıca gereklidir.
+
+### Binance 24 Mart 2023 resmi piyasa kesintisi
+
+İlk gerçek V7 Actions denemesinde BTC/ETH/SOL/XRP/BNB
+kaynakları Mart 2023 arşivinde saat 565 civarında
+`wrong month, timeframe or incomplete hourly candle`
+hatasıyla DURDU. Bu otomatik araştırma sonuçları
+**başarılı backtest değildir**.
+
+Binance 24 Mart 2023 tarihinde spot işlemleri durdurmuş
+ve 14:00 UTC'de yeniden başlatmıştır. Orijinal
+2023-03-24 12:00 barı erken kesilmiş olabilir;
+13:00 tam saati işlem görmediğinden mevcut değildir.
+Bunlar kesintisiz işlem saati gibi doldurulmaz.
+Resmi açıklama:
+https://www.binance.com/en/support/announcement/detail/813a31506e9f478ea8c1058b425df87a
+Açık veri kaynak raporu:
+https://github.com/binance/binance-public-data/issues/501
+
+V7.1 yalnızca bu kanıtlanmış iki işlem-dışı saati
+araştırma takviminden çıkarır. Kesinti öncesindeki
+24 saatlik olay ufku ve sonrasındaki 168 saatlik
+geçmiş feature/aynı saat kıyas kontrolü korunur:
+bu aralıktaki sinyal veya karşılaştırma örneği
+geçersizdir. Diğer saatlerde tek bir boşluk,
+bozuk OHLC veya resmi SHA uyuşmazlığı bile
+ayrı ve açıklamalı kaynak hatası olarak kalır;
+uydurma fiyat veya başka borsa verisi kullanılmaz.
+
+Orijinal 36 arşiv ZIP'in SHA listesi ve
+çıkarılan orijinal kısmi mum sayısı ayrıca
+raporlanır. **V7.1 dönem ve strateji politikası
+yeni hash taşır**; V7'nin önceki reddedilen
+çalışmaları veya geçmiş PAPER kabul kayıtları
+yeniden yazılmaz.
