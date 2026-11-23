@@ -294,7 +294,7 @@ class IntegrityTests(unittest.TestCase):
         folds["prospective"][0]["actual_first_seen_at_utc"] = utc("2023-01-01")
         result = forward.evaluate(self.design, self.bundle, folds, root=self.root)
         self.assertEqual(result["status"], "EVALUATION_FAIL_CLOSED", result)
-        self.assertEqual(result["reason"], "FORWARD_EVENT_NOT_NEWLY_OBSERVED_AFTER_REGISTRATION")
+        self.assertEqual(result["reason"], "BACKDATED_PROSPECTIVE_FIRST_SEEN")
         self.assertFalse(result["paper_eligible"])
 
     def test_audit_queue_with_no_evidence_is_fully_blocked(self):
