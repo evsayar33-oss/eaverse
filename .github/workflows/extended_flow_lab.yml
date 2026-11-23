@@ -15,6 +15,8 @@ on:
       - 'tests/test_cross_venue_reference.py'
       - 'eaverse/statistical_audit.py'
       - 'tests/test_statistical_audit.py'
+      - 'eaverse/empirical_trials.py'
+      - 'tests/test_empirical_trials.py'
   pull_request:
     paths:
       - '.github/workflows/extended_flow_lab.yml'
@@ -27,6 +29,8 @@ on:
       - 'tests/test_cross_venue_reference.py'
       - 'eaverse/statistical_audit.py'
       - 'tests/test_statistical_audit.py'
+      - 'eaverse/empirical_trials.py'
+      - 'tests/test_empirical_trials.py'
       - 'docs/EAVERSE_V7_RESEARCH_FOUNDRY_TR.md'
   schedule:
     - cron: '37 6 * * 2'
@@ -56,6 +60,7 @@ jobs:
       - name: Test historical source, no-future-leakage and evidence chain
         run: |
           python -m unittest discover -s tests -p 'test_extended_flow.py' -v
+          python -m unittest discover -s tests -p 'test_empirical_trials.py' -v
           python -m unittest discover -s tests -p 'test_source_council.py' -v
           python -m unittest discover -s tests -p 'test_cross_venue_reference.py' -v
           python -m py_compile eaverse/extended_flow.py eaverse/source_council.py eaverse/early_flow.py eaverse/cross_venue_reference.py
@@ -119,6 +124,7 @@ jobs:
           set -euo pipefail
           python -m eaverse.extended_flow --symbol "${{ matrix.symbol }}" \
             --ledger "$V7_EVIDENCE_ROOT/observations/extended_flow/studies.jsonl" \
+            --statistical-ledger "$V7_EVIDENCE_ROOT/observations/extended_flow/statistical_trials.jsonl" \
             --out out/extended_flow
           python - <<'PY'
           import json, os
@@ -144,6 +150,25 @@ jobs:
                       "; missing proofs: " + str(len(z["missing_proofs"])) +
                       "; no PAPER/LIVE promotion.\n")
           PY
+      - name: Verify source-aligned real statistical report is still research-only
+        run: |
+          python - <<'PY'
+          import json, os
+          base=json.load(open("out/extended_flow/report.json"))
+          stats=json.load(open("out/extended_flow/statistical_trials.json"))
+          assert stats["source_digest"] == base["source_digest"]
+          assert stats["source_policy_sha256"] == base["policy_sha256"]
+          assert stats["registered_long_trial_count"] == 32
+          assert stats["paper_eligible"] is False and stats["live_allowed"] is False
+          assert stats["untouched_holdout_read"] is False
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("Aligned costed weekly return paths: " +
+                      str(len(stats["weekly_panel"]["dates_utc_week_end"])) + " weeks, " +
+                      str(stats["registered_long_trial_count"]) +
+                      " long trials. PBO: " + str(stats["pbo"].get("pbo")) +
+                      "; DSR: " + str(stats["dsr"].get("dsr")) +
+                      ". HISTORICAL RESEARCH ONLY; zero additional PAPER authority.\\n")
+          PY
       - name: Persist complete aggregated source and strategy study, never vendor data
         shell: bash
         run: |
@@ -151,7 +176,7 @@ jobs:
           ROOT="$V7_EVIDENCE_ROOT"
           git -C "$ROOT" config user.name 'github-actions[bot]'
           git -C "$ROOT" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -C "$ROOT" add observations/extended_flow/studies.jsonl
+          git -C "$ROOT" add observations/extended_flow/studies.jsonl observations/extended_flow/statistical_trials.jsonl
           if git -C "$ROOT" diff --cached --quiet; then
             echo 'UNCHANGED_ARCHIVE_AND_POLICY_NO_NEW_EVIDENCE' >> "$GITHUB_STEP_SUMMARY"
           else
@@ -165,6 +190,7 @@ jobs:
           path: |
             out/extended_flow/report.json
             out/extended_flow/statistical_audit.json
+            out/extended_flow/statistical_trials.json
           if-no-files-found: warn
           retention-days: 90
 
