@@ -33,7 +33,7 @@ SEC_BASE="https://data.sec.gov/submissions/CIK"
 MAX_SOURCE_BYTES=12_000_000
 MAX_ROWS=120_000
 MAX_SEC_ARCHIVE_SEGMENTS_PER_ISSUER=2
-SEC_ARCHIVE_FILENAME_RE=re.compile(r"^CIK(\\d{10})-submissions-(\\d{3})\\.json$")
+SEC_ARCHIVE_FILENAME_RE=re.compile(r"^CIK(\d{10})-submissions-(\d{3})\.json$")
 VIX_FIXED_THRESHOLDS=(25,35)
 SEC_AGENT_RE="^[^\\s]+(?:\\s+[^\\s]+)*\\s+[^\\s@]+@[^\\s@]+\\.[^\\s@]+$"
 
