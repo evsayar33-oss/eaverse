@@ -1,0 +1,133 @@
+name: Eaverse V7 three-year multi-asset event-foundry (RESEARCH ONLY)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/extended_flow_lab.yml'
+      - 'eaverse/extended_flow.py'
+      - 'eaverse/early_flow.py'
+      - 'eaverse/source_council.py'
+      - 'tests/test_extended_flow.py'
+      - 'tests/test_source_council.py'
+  pull_request:
+    paths:
+      - '.github/workflows/extended_flow_lab.yml'
+      - 'eaverse/extended_flow.py'
+      - 'eaverse/early_flow.py'
+      - 'eaverse/source_council.py'
+      - 'tests/test_extended_flow.py'
+      - 'tests/test_source_council.py'
+      - 'docs/EAVERSE_V7_RESEARCH_FOUNDRY_TR.md'
+  schedule:
+    - cron: '37 6 * * 2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eaverse-v7-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline-research-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Test historical source, no-future-leakage and evidence chain
+        run: |
+          python -m unittest discover -s tests -p 'test_extended_flow.py' -v
+          python -m unittest discover -s tests -p 'test_source_council.py' -v
+          python -m py_compile eaverse/extended_flow.py eaverse/source_council.py eaverse/early_flow.py
+      - name: Export exactly classified cross-market research providers
+        run: |
+          python -m eaverse.source_council --out out/source_council
+          cat out/source_council/sources.json > /dev/null
+          echo "Source classification is a lead list, not full historical download or PAPER approval." >> "$GITHUB_STEP_SUMMARY"
+
+  authenticated-archive-research:
+    if: github.event_name != 'pull_request'
+    needs: offline-research-contracts
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, BNBUSDT, ADAUSDT, LINKUSDT, AVAXUSDT]
+    runs-on: ubuntu-latest
+    timeout-minutes: 38
+    permissions:
+      contents: write
+    concurrency:
+      group: eaverse-v7-asset-${{ matrix.symbol }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Restore only this asset's append-only research evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYMBOL="${{ matrix.symbol }}"
+          BRANCH="research/eaverse-v7-${SYMBOL,,}-evidence"
+          ROOT="$RUNNER_TEMP/v7-research-evidence"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin "refs/heads/$BRANCH"
+            git worktree add --detach "$ROOT" FETCH_HEAD
+          else
+            git worktree add --detach "$ROOT" HEAD
+          fi
+          mkdir -p "$ROOT/observations/extended_flow"
+          echo "V7_EVIDENCE_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "V7_EVIDENCE_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+      - name: Download true 2023-25 hourly ZIPs, verify official checksums, test 64 frozen variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m eaverse.extended_flow --symbol "${{ matrix.symbol }}" \
+            --ledger "$V7_EVIDENCE_ROOT/observations/extended_flow/studies.jsonl" \
+            --out out/extended_flow
+          python - <<'PY'
+          import json, os
+          x=json.load(open("out/extended_flow/report.json"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write(f"### Eaverse V7: {x['symbol']}\n\n")
+              f.write(f"Official SHA-verified monthly archives: {x['archive_months']}\n\n")
+              f.write(f"Complete hourly observations: {x['hours']}; fixed hypotheses: {x['hypothesis_count']}\n\n")
+              for name,count in sorted(x["decisions"].items()):
+                  f.write(f"- {name}: {count}\n")
+              f.write("\nNo historical replay is new prospective data, PAPER or LIVE authorization.\n")
+          PY
+      - name: Persist complete aggregated source and strategy study, never vendor data
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$V7_EVIDENCE_ROOT"
+          git -C "$ROOT" config user.name 'github-actions[bot]'
+          git -C "$ROOT" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$ROOT" add observations/extended_flow/studies.jsonl
+          if git -C "$ROOT" diff --cached --quiet; then
+            echo 'UNCHANGED_ARCHIVE_AND_POLICY_NO_NEW_EVIDENCE' >> "$GITHUB_STEP_SUMMARY"
+          else
+            git -C "$ROOT" commit -m "research(v7): append complete source-and-hypothesis evidence [skip ci]"
+            git -C "$ROOT" push origin "HEAD:refs/heads/$V7_EVIDENCE_BRANCH"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eaverse-v7-${{ matrix.symbol }}-${{ github.run_id }}
+          path: out/extended_flow/report.json
+          if-no-files-found: warn
+          retention-days: 90
