@@ -52,10 +52,10 @@ def _coinbase(obj, last_closed):
             raise ValueError("COINBASE_NOT_DAILY_CANDLE")
         timestamp,low,high,opn,close,volume = map(float,line)
         date=datetime.fromtimestamp(timestamp,timezone.utc)
-        if date.hour or date.minute or date.second or date.microsecond:
-            raise ValueError("COINBASE_NON_MIDNIGHT_DAILY_ROW")
         if date.date() > last_closed:
             continue
+        if date.hour or date.minute or date.second or date.microsecond:
+            raise ValueError("COINBASE_NON_MIDNIGHT_DAILY_ROW")
         if not (0<low<=min(opn,close)<=high and volume>=0):
             raise ValueError("COINBASE_INCONSISTENT_OHLC")
         key=date.date().isoformat()
@@ -78,10 +78,10 @@ def _kraken(obj, last_closed):
             raise ValueError("KRAKEN_BAD_OHLC_RECORD")
         stamp=float(line[0])
         date=datetime.fromtimestamp(stamp,timezone.utc)
-        if date.hour or date.minute or date.second or date.microsecond:
-            raise ValueError("KRAKEN_NON_MIDNIGHT_DAILY_ROW")
         if date.date()>last_closed:
             continue
+        if date.hour or date.minute or date.second or date.microsecond:
+            raise ValueError("KRAKEN_NON_MIDNIGHT_DAILY_ROW")
         opn,hi,lo,close=(float(line[k]) for k in (1,2,3,4))
         if not 0<lo<=min(opn,close)<=hi:
             raise ValueError("KRAKEN_INCONSISTENT_OHLC")
