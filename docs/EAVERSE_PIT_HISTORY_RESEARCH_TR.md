@@ -27,6 +27,15 @@ quant_superlab kaynak manifestleri ve önerileri sağlayabilir; ham özel/lisans
 
 Eaverse PIT historical research (NO ORDERS), PR ve zamanlanmış çalışmalarda adversarial offline testler çalıştırır. Main dalında yalnız doğrulanmış araştırma verisi staged ise dosyaları gerçek engine ile tekrar oynatır. Veri paketi yoksa NO_VERIFIED_HISTORICAL_INPUT yazar; geçmiş test yapılmış gibi davranmaz. Kanıt çıktılarını 90 günlük Actions artifact olarak verir. Emirlere, Telegram'a veya PAPER kabul mantığına dokunmaz.
 
+
+## Otomatik gerçek Binance arşiv pilotu
+
+Bu sürüm ayrıca Eaverse'ın kendi deposunda ayrı bir gerçek-kaynak toplayıcısı içerir: pit_binance_pilot. Main dalına merge edildiğinde ayrı read-only Actions işi, **2024 ve 2025 BTCUSDT Binance spot 1d aylık ZIP arşivlerini** indirir; her ZIP'in resmi .CHECKSUM SHA-256'sını, tek CSV içeriğini, 600+ kesintisiz günlük barı, taker-buy base hacim değerlerini ve kaynak/manifest hash'lerini doğrular. Doğrulanmış tarihsel olayı Eaverse'ın kendi araştırma/simülasyon çekirdeğine aktarır ve yalnız aggregate raporunu 90 gün boyunca Actions artifact olarak saklar. Ham vendor ZIP/CSV depoya veya artifact'e yayımlanmaz.
+
+Bu paket **kısıtlı kişisel, ticari olmayan tarihsel araştırma** koşullarıyla kullanılır. Kaynak kullanım koşulları: https://github.com/binance/binance-public-data/blob/master/TERMS_AND_CONDITIONS.md (26 Ağustos 2026). Bu koşullar üretimde/üçüncü taraf verisiyle ticari kullanım izni olarak yorumlanmamalıdır. Kaynak 403/404 verirse veya checksum uyuşmazsa iş SOURCE_NOT_VERIFIED durumu bildirir; boş sonuçlardan strateji kanıtı veya kayıt üretmez. Tarihsel arşivlerin sonradan revize edilmesi nedeniyle gerçek geçmiş yayın-anı sürümleri ayrıca doğrulanmış sayılmaz.
+
+Pilotun kapsamı özellikle tek parite ve sabit 2024–2025 dönemiyle sınırlandırılmıştır; araştırma sonucuna göre sembol/dönem seçimi değiştirilemez. BIST/US için önceki resmi-event adaptörleri hazırdır, ancak erişim/haklar ve PIT-price/universe zorlukları çözülmeden otomatik tarihsel entegrasyon tamamlandı denemez.
+
 ## Zorunlu tamamlanmamış aşamalar
 
 Kaynak lisans/otomasyon hakkı, tüm arşivlerin özgün checksum'ları, revizyonlar ve tam yayın saati, BIST/US delist ve corporate actions, fiyat yürütülebilirliği, spread/kayma/kapasite, multiple-testing düzeltmesi, untouched OOS ve dondurulmuş prospective gözlemler doğrulanmadan herhangi bir yeni strateji otomatik PAPER/LIVE'e geçemez.
