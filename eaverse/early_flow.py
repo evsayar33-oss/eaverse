@@ -284,6 +284,7 @@ def analyze(bars: pd.DataFrame, provenance: list, symbol: str, *, captured_utc: 
                 )
                 # The decision to OPEN the holdout uses zero holdout
                 # prices/returns and no ex-post threshold optimization.
+                validated=False
                 if not adequate:
                     decision="DEFER_MORE_INDEPENDENT_CASES_OR_CONTROLS"
                 elif direction==1:
