@@ -15,7 +15,7 @@ def feeds(asset,now,*,diff=0):
         ts=int(start.timestamp())
         price=100+day*.01
         coinbase.append([ts,price-1,price+1,price,price,120])
-        kraken.append([ts,str(price),str(price+1),str(price-1),
+        kraken.append([ts,str(price),str(max(price+1,price*(1+diff)+1)),str(price-1),
                        str(price*(1+diff)),str(price),str(120),42])
     kraken.insert(0,[int(now.timestamp()),"101","102","100","101","101","120",42])
     return coinbase, {"error":[],"result":{"someExchangePair":kraken,"last":1000}}
