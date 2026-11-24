@@ -403,8 +403,17 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                                 365 if market.calendar is None else 252, calendar_cutoffs,
                             )
                             daily_records.extend(daily)
-                        result["coverage_debt"] = coverage.run_asset(
-                            db, asset, market, bars, event_dates, calendar_cutoffs, deadline=deadline)
+                        # A coverage diagnostic failure must not erase existing PAPER progress.
+                        db.execute("SAVEPOINT coverage_research")
+                        try:
+                            result["coverage_debt"] = coverage.run_asset(
+                                db, asset, market, bars, event_dates, calendar_cutoffs, deadline=deadline)
+                        except Exception as exc:
+                            db.execute("ROLLBACK TO coverage_research")
+                            result["coverage_debt"] = {"status": "error", "error": f"{type(exc).__name__}: {exc}"[:300]}
+                            print(f"Coverage research error for {asset}: {exc}", flush=True)
+                        finally:
+                            db.execute("RELEASE coverage_research")
                         report["assets"][asset] = {**result, "paper": paper}
                         universe.record(db, market.name, symbol, now, None)
                         if tracked or symbol in market.symbols:
@@ -431,7 +440,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             health(db, f"market:{name}", market_error)
     if daily_report:
         events.write_daily(daily_report, daily_records)
-    report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+    report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version<>?", (coverage.VERSION,)).fetchone()[0]
     report["coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0]
     report["total_event_trials"] = db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0]
     report["paper"] = [

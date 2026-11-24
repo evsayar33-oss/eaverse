@@ -39,15 +39,16 @@ def projection(db_path, report, run_url):
     with sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
         research = {
-            "total_trials": db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0],
-            "unique_strategies": db.execute("SELECT COUNT(DISTINCT id) FROM attempts").fetchone()[0],
+            "total_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
+            "coverage_debt_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version LIKE 'coverage-%'").fetchone()[0],
+            "unique_strategies": db.execute("SELECT COUNT(DISTINCT id) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
             "total_event_trials": db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0],
-            "tested_assets": db.execute("SELECT COUNT(DISTINCT asset) FROM attempts").fetchone()[0],
+            "tested_assets": db.execute("SELECT COUNT(DISTINCT asset) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
             "new_trials": sum(item.get("new_trials", 0) for item in assets.values()),
             "new_event_trials": sum(item.get("events", {}).get("new_trials", 0) for item in assets.values()),
             "assets": [{"asset": row[0], "total_trials": row[1],
                         "new_trials": assets.get(row[0], {}).get("new_trials", 0)}
-                       for row in db.execute("SELECT asset,COUNT(*) FROM attempts GROUP BY asset ORDER BY asset")],
+                       for row in db.execute("SELECT asset,COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%' GROUP BY asset ORDER BY asset")],
         }
         research["direction_count"] = db.execute("SELECT count(*) FROM direction_checks").fetchone()[0]
         comparisons = []

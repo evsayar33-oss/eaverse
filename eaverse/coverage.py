@@ -44,6 +44,12 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS coverage_cursor (
     version TEXT NOT NULL, next_trial INTEGER NOT NULL,
     PRIMARY KEY(asset,timeframe,lane,version)
 )"""
+PENDING = """CREATE TABLE IF NOT EXISTS coverage_pending (
+    asset TEXT NOT NULL, timeframe TEXT NOT NULL, lane TEXT NOT NULL,
+    version TEXT NOT NULL, position INTEGER NOT NULL, reason TEXT NOT NULL,
+    checked TEXT NOT NULL,
+    PRIMARY KEY(asset,timeframe,lane,version,position)
+)"""
 
 
 @lru_cache(maxsize=2)
@@ -71,7 +77,7 @@ def rule_grid(frame):
 
 @lru_cache(maxsize=2)
 def representatives(frame):
-    return tuple((name, 20, 0. if name in NORMALIZED else None, "above")
+    return tuple((name, 20, NORMALIZED[name][len(NORMALIZED[name])//2] if name in NORMALIZED else None, "above")
                  for name in dict.fromkeys(rule[0] for rule in rule_grid(frame)))
 
 
@@ -95,7 +101,9 @@ def templates(frame, lane):
                             groups[(rules, vote)] = (rules, vote, None)
         return tuple(groups.values())
     names = (tuple(events.CALENDAR) if lane == "calendar" else tuple(sorted(events.FAMILIES)))
-    return tuple(((rule,), 1, (name, mode)) for name in names for rule in reps for mode in ("only", "avoid"))
+    if frame == "1w" and lane == "calendar":
+        names = tuple(name for name in names if not name.startswith("WEEKDAY_"))
+    return tuple(((rule,), 1, (name, mode)) for rule in reps for name in names for mode in ("only", "avoid"))
 
 
 def total(frame, lane):
@@ -189,10 +197,16 @@ def event_mask(index, name, dates):
     return pd.Series(result, index=index)
 
 
-def desired(bars, spec, dates):
+def desired(bars, spec, dates, daily_periods=252):
     flags = [flag(bars, rule) for rule in spec["rules"]]
     votes = sum(f.astype(int) for f in flags)
     signal = votes >= spec["vote"]
+    valid = pd.Series(True, index=bars.index)
+    for name, n, _, _ in spec["rules"]:
+        if name in NORMALIZED:
+            valid &= measurement(bars, name, n).notna()
+        elif name == "vwma":
+            valid &= bars.volume.rolling(n).sum() > 0
     gate = pd.Series(True, index=bars.index)
     if spec["event"]:
         name, mode = spec["event"]
@@ -202,27 +216,33 @@ def desired(bars, spec, dates):
     signed = signal.astype(float) * (-1 if direction == "short" else 1)
     if direction == "long_short":
         signed = 2 * signed - 1
+    signed = signed.where(valid, 0.)
     if spec["style"] == "confirmation2":
         signed = signed.where(signed == signed.shift(), 0.)
     elif spec["style"].startswith("pulse"):
         horizon = int(spec["style"][5:])
         out = np.zeros(len(signed))
         remaining, position = 0, 0.
-        previous = 0.
+        previous, previous_gate = 0., False
         for i, value in enumerate(signed.to_numpy()):
-            if not remaining and value and value != previous and gate.iloc[i]:
+            if not remaining and value and (value != previous or not previous_gate) and gate.iloc[i]:
                 remaining, position = horizon, value
+            if not valid.iloc[i]:
+                remaining = 0
             if remaining:
                 out[i] = position
                 remaining -= 1
-            previous = value
+            previous, previous_gate = value, bool(gate.iloc[i])
         signed = pd.Series(out, index=bars.index)
-    # Event gates are enforced even for fixed-horizon exposure; no extrapolation.
-    signed = signed.where(gate, 0.)
+    else:
+        signed = signed.where(gate, 0.)
+    # Confirmation also requires the event gate. Pulse uses it at entry only.
+    if spec["style"] == "confirmation2":
+        signed = signed.where(gate, 0.)
     if spec["sizing"] == "half":
         signed *= .5
     elif spec["sizing"] == "vol_target":
-        periods = 52 if spec["frame"] == "1w" else 252
+        periods = 52 if spec["frame"] == "1w" else daily_periods
         vol = bars.close.pct_change(fill_method=None).rolling(20).std() * math.sqrt(periods)
         signed *= (.25 / vol.where(vol > 0)).clip(upper=1).fillna(0)
     return signed
@@ -253,64 +273,94 @@ def evaluate_fold(bars, weights, start, stop, cost_bps):
             "entries": trades, "status": "evaluated" if trades else "no_entries"}
 
 
+def warmup_for(spec):
+    needed = [22]
+    for name, n, _, _ in spec["rules"]:
+        extra = (100 if name == "low_vol" else n if name in ("cost_z", "macd", "adx") else 0)
+        needed.append(n + extra + 3)
+    return max(needed)
+
+
+def eligible(current, spec, event_dates, cutoffs):
+    sample = current
+    name = spec["event"][0] if spec["event"] else None
+    if spec["lane"] == "macro":
+        if not event_dates.get(name) or not cutoffs.get(name):
+            return None, "blocked_event_data"
+        sample = current.loc[current.index <= pd.Timestamp(cutoffs[name])]
+    warmup = warmup_for(spec)
+    if len(sample) < warmup + 120:
+        return None, "blocked_history"
+    if spec["lane"] == "macro":
+        mask = event_mask(sample.index, name, event_dates)
+        boundary = warmup + (len(sample) - warmup) * 3 // 4
+        if not mask.iloc[warmup:boundary].any() or not mask.iloc[boundary:].any():
+            return None, "blocked_event_occurrences"
+    return sample, None
+
+
 def run_asset(db, asset, market, bars, event_dates, cutoffs, *, deadline=None):
     import time
+    from datetime import UTC, datetime
     db.execute(SCHEMA)
+    db.execute(PENDING)
     result = {}
     for frame in FRAMES:
         current = bars if frame == "1d" else weekly(bars)
-        # Daily and weekly legacy indicators have a maximum warm-up (including
-        # the low-vol baseline and MACD slow span). New cost-z uses two windows.
-        warmup = 420 if frame == "1d" else 160
-        # Smaller daily datasets can still support many rules, but this uniform
-        # minimum avoids falsely counting warm-up as a valid signal.
         for lane in LANES:
             key = frame + ":" + lane
-            row = db.execute("SELECT next_trial FROM coverage_cursor WHERE asset=? AND timeframe=? AND lane=? AND version=?",
-                             (asset, frame, lane, VERSION)).fetchone()
+            args = (asset, frame, lane, VERSION)
+            row = db.execute("SELECT next_trial FROM coverage_cursor WHERE asset=? AND timeframe=? AND lane=? AND version=?", args).fetchone()
             position = row[0] if row else 0
             count = total(frame, lane)
-            status = {"completed": position, "registered": count}
+            pending_query = "FROM coverage_pending WHERE asset=? AND timeframe=? AND lane=? AND version=?"
+            pending = db.execute("SELECT count(*) " + pending_query, args).fetchone()[0]
+            status = {"completed": position-pending, "registered": count, "pending": pending,
+                      "scheduled": position, "status": "grid_complete" if not pending and position >= count else "blocked_pending"}
             result[key] = status
-            spec = plan(frame, lane, position)
-            if spec is None:
-                status["status"] = "grid_complete"
-                continue
             if deadline is not None and time.monotonic() >= deadline:
                 status["status"] = "deferred_runtime"
                 continue
-            sample = current
-            if lane == "macro":
-                name = spec["event"][0]
-                if not event_dates.get(name) or not cutoffs.get(name):
-                    status.update(status="blocked_event_data", event=name)
+            retry = db.execute("SELECT position " + pending_query + " ORDER BY checked,position LIMIT 1", args).fetchone()
+            # At most one old blocked item and one new item are inspected. A
+            # missing long-window or macro input cannot starve other settings.
+            candidates = ([(retry[0], False)] if retry else []) + ([(position, True)] if position < count else [])
+            for offset, is_new in candidates:
+                spec = plan(frame, lane, offset)
+                sample, blocked = eligible(current, spec, event_dates, cutoffs)
+                if blocked:
+                    db.execute("INSERT OR REPLACE INTO coverage_pending VALUES (?,?,?,?,?,?,?)",
+                               (*args, offset, blocked, datetime.now(UTC).isoformat()))
+                    if is_new:
+                        position += 1
+                        pending += 1
+                        db.execute("INSERT OR REPLACE INTO coverage_cursor VALUES (?,?,?,?,?)", (*args, position))
+                    status.update(status=blocked, pending=pending, scheduled=position, completed=position-pending)
                     continue
-                sample = current.loc[current.index <= pd.Timestamp(cutoffs[name])]
-            if len(sample) < warmup + 80:
-                status.update(status="blocked_history", bars=len(sample), minimum=warmup+80)
-                continue
-            if lane == "macro":
-                mask = event_mask(sample.index, name, event_dates)
-                if not mask.iloc[warmup:].any():
-                    status.update(status="blocked_event_occurrences", event=name)
-                    continue
-            boundary = warmup + (len(sample) - warmup) * 3 // 4
-            weights = desired(sample, spec, event_dates)
-            discovery = evaluate_fold(sample, weights, warmup, boundary, market.cost_bps)
-            validation = evaluate_fold(sample, weights, boundary, len(sample), market.cost_bps)
-            identity = research.digest([VERSION, spec])
-            # Existing archive compacts full records and retains immutable IDs.
-            # Never participate in the legacy selection/PAPER pipeline (separate version).
-            record = {"pass": False, "coverage_only": True, "status": discovery["status"],
-                      "metrics": discovery, "paper_eligible": False}
-            validated = {"metrics": validation, "retrospective_only": True, "paper_eligible": False}
-            db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (VERSION, asset, identity, "coverage:" + key, research.canonical(spec),
-                        market.source, data.fingerprint(sample), sample.index[-1].date().isoformat(),
-                        os.getenv("GITHUB_SHA", "local"), research.canonical(POLICY),
-                        research.canonical(record), research.canonical(validated)))
-            db.execute("INSERT OR REPLACE INTO coverage_cursor VALUES (?,?,?,?,?)",
-                       (asset, frame, lane, VERSION, position + 1))
-            status.update(status="evaluated", completed=position+1, id=identity,
-                          discovery_status=discovery["status"], validation_status=validation["status"])
+                warmup = warmup_for(spec)
+                boundary = warmup + (len(sample) - warmup) * 3 // 4
+                weights = desired(sample, spec, event_dates, 365 if market.calendar is None else 252)
+                discovery = evaluate_fold(sample, weights, warmup, boundary, market.cost_bps)
+                validation = evaluate_fold(sample, weights, boundary, len(sample), market.cost_bps)
+                identity = research.digest([VERSION, spec])
+                event = spec["event"][0] if lane == "macro" else None
+                record = {"pass": False, "coverage_only": True, "status": discovery["status"],
+                          "metrics": discovery, "paper_eligible": False,
+                          "calendar_sha256": research.digest(event_dates[event]) if event else None,
+                          "calendar_asof": cutoffs[event] if event else None}
+                validated = {"metrics": validation, "retrospective_only": True, "paper_eligible": False}
+                db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                           (VERSION, asset, identity, "coverage:" + key, research.canonical(spec),
+                            market.source, data.fingerprint(sample), sample.index[-1].date().isoformat(),
+                            os.getenv("GITHUB_SHA", "local"), research.canonical(POLICY),
+                            research.canonical(record), research.canonical(validated)))
+                if is_new:
+                    position += 1
+                    db.execute("INSERT OR REPLACE INTO coverage_cursor VALUES (?,?,?,?,?)", (*args, position))
+                else:
+                    db.execute("DELETE " + pending_query + " AND position=?", (*args, offset))
+                    pending -= 1
+                status.update(status="evaluated", completed=position-pending, pending=pending, scheduled=position,
+                              id=identity, discovery_status=discovery["status"], validation_status=validation["status"])
+                break
     return result

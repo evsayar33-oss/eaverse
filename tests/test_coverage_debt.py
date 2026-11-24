@@ -52,17 +52,21 @@ class CoverageDebtTests(unittest.TestCase):
             with db:
                 first = coverage.run_asset(db, "asset", data.MARKETS[0], bars, {}, {})
             self.assertEqual(first["1d:macro"]["status"], "blocked_event_data")
+            self.assertEqual(first["1d:macro"]["completed"], 0)
+            self.assertEqual(first["1d:macro"]["pending"], 1)
             self.assertEqual(first["1d:single"]["completed"], 1)
             with db:
                 second = coverage.run_asset(db, "asset", data.MARKETS[0], bars, {}, {})
             self.assertEqual(second["1d:single"]["completed"], 2)
+            self.assertEqual(second["1d:macro"]["completed"], 0)
+            self.assertEqual(second["1d:macro"]["pending"], 2)
             self.assertNotEqual(first["1d:single"]["id"], second["1d:single"]["id"])
             self.assertEqual(db.execute("SELECT count(*) FROM paper").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT count(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0], 16)
 
     def test_short_history_does_not_advance(self):
         with engine.connect(":memory:") as db:
-            result = coverage.run_asset(db, "asset", data.MARKETS[0], market_frame(200), {}, {})
+            result = coverage.run_asset(db, "asset", data.MARKETS[0], market_frame(50), {}, {})
             self.assertEqual(result["1d:single"]["status"], "blocked_history")
             self.assertEqual(result["1d:single"]["completed"], 0)
 
