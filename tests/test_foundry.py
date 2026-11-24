@@ -7,7 +7,7 @@ from test_research import market_frame
 
 class FoundryTests(unittest.TestCase):
     def test_family_rotation_and_generation(self):
-        families=[foundry.plan("asset","1d","parameter",i)["rules"][0][0] for i in range(len(foundry.FAMILIES))]
+        families=[(lambda rule: rule[1] if rule[0]=="surface" else rule[0])(foundry.plan("asset","1d","parameter",i)["rules"][0]) for i in range(len(foundry.FAMILIES))]
         self.assertEqual(set(families),set(foundry.FAMILIES))
         self.assertEqual(len(set(str(foundry.plan("asset","1d","grammar",i)) for i in range(100))),100)
         self.assertEqual(foundry.plan("a","1d","risk",1),foundry.plan("a","1d","risk",1))

@@ -59,10 +59,18 @@ jobs:
           assert p['real_profit_not_inferred_from_source_readiness'] is True
           print('FAIL_CLOSED_148_NO_PAPER_NO_LIVE')
           PY
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/pit_integrity/audit.json
+          receipt: out/pit_integrity/superlab.json
       - uses: actions/upload-artifact@v4
         with:
           name: eaverse-v9-source-integrity-gate
-          path: out/pit_integrity/audit.json
+          path: |
+            out/pit_integrity/audit.json
+            out/pit_integrity/superlab.json
           retention-days: 90
       - name: Report runner capacity
         if: always()

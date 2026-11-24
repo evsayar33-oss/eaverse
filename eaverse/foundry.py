@@ -14,7 +14,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from . import coverage, data, research
+from . import coverage, data, research, surface
 
 VERSION = "coverage-2"
 LANES = ("parameter", "grammar", "risk")
@@ -40,7 +40,7 @@ def choose_rule(frame, name, rng):
         return (name, rng.choice((5, 9, 14, 21, 28)), rng.choice((1, 3, 5)), rng.choice((20, 30, 50, 70, 80)), rng.choice(("above", "below", "cross_up", "cross_down")))
     if name == "adx_multi":
         return (name, rng.choice((7, 10, 14, 21, 28)), rng.choice((7, 14, 21)), rng.choice((15, 20, 25, 30, 40)), rng.choice(("above", "below")))
-    return rng.choice([r for r in coverage.rule_grid(frame) if r[0] == name])
+    return surface.choose(frame,name,rng)
 
 
 def plan(asset, frame, lane, position):
@@ -88,7 +88,8 @@ def adaptive_plan(db, asset, frame, lane, position):
     rng=random.Random(research.digest([VERSION,asset,frame,lane,position,parent_id]))
     # Jointly mutate two or more dimensions while keeping the original rule family.
     slot=rng.randrange(len(parent["rules"]))
-    parent["rules"][slot]=choose_rule(frame,parent["rules"][slot][0],rng)
+    old=parent["rules"][slot]
+    parent["rules"][slot]=choose_rule(frame,old[1] if old[0]=="surface" else old[0],rng)
     parent["confirmation"]=spec["confirmation"]
     parent["size"]=spec["size"]
     parent["direction"]=spec["direction"]
@@ -100,11 +101,13 @@ def adaptive_plan(db, asset, frame, lane, position):
 
 
 def warmup(spec):
-    spans=[coverage.warmup_for({"rules":[r for r in spec["rules"] if r[0] not in SPECIAL]}),
+    spans=[coverage.warmup_for({"rules":[r for r in spec["rules"] if r[0] not in SPECIAL and r[0]!="surface"]}),
            spec["risk"]["atr_window"]+3]
     for rule in spec["rules"]:
         name=rule[0]
-        if name=="macd_multi":
+        if name=="surface":
+            spans.append(surface.warmup(rule))
+        elif name=="macd_multi":
             spans.append(rule[2]+rule[3]+3)
         elif name=="adx_multi":
             spans.append(2*rule[1]+2*rule[2]+3)
@@ -134,6 +137,8 @@ def true_range(bars):
 
 def signal(bars, rule):
     name = rule[0]
+    if name=="surface":
+        return surface.signal(bars,rule)
     if name not in SPECIAL:
         valid = pd.Series(True, index=bars.index)
         if name in coverage.NORMALIZED:

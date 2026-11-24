@@ -118,11 +118,19 @@ jobs:
             git -C "$ROOT" commit -m "research(equity): source PIT availability/coverage SHA evidence [skip ci]"
             git -C "$ROOT" push origin "HEAD:refs/heads/$EQUITY_SOURCE_BRANCH"
           fi
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/equity_source_intelligence/coverage_report.json
+          receipt: out/equity_source_intelligence/superlab.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: eaverse-equity-source-audit-${{ github.run_id }}
-          path: out/equity_source_intelligence/coverage_report.json
+          path: |
+            out/equity_source_intelligence/coverage_report.json
+            out/equity_source_intelligence/superlab.json
           retention-days: 90
           if-no-files-found: warn
       - name: Report runner capacity

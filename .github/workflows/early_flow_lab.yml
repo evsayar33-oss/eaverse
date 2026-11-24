@@ -124,11 +124,19 @@ jobs:
             git -C "$ROOT" commit -m "research(early-flow): SHA-verified retrospective decision summary [skip ci]"
             git -C "$ROOT" push origin "HEAD:refs/heads/$EARLY_FLOW_BRANCH"
           fi
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/early_flow/report.json
+          receipt: out/early_flow/superlab.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: eaverse-hourly-${{ matrix.symbol }}-${{ github.run_id }}
-          path: out/early_flow/report.json
+          path: |
+            out/early_flow/report.json
+            out/early_flow/superlab.json
           retention-days: 90
           if-no-files-found: warn
       - name: Report runner capacity
