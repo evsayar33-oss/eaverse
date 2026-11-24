@@ -44,10 +44,18 @@ jobs:
           assert len(report['designs'])<=300
           print('SAFE_DESIGN_QUEUE',report['by_market'])
           PY
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/causal_discovery/queue.json
+          receipt: out/causal_discovery/superlab.json
       - uses: actions/upload-artifact@v4
         with:
           name: eaverse-v8-causal-design-queue
-          path: out/causal_discovery/queue.json
+          path: |
+            out/causal_discovery/queue.json
+            out/causal_discovery/superlab.json
           retention-days: 90
       - name: Report runner capacity
         if: always()

@@ -183,12 +183,26 @@ jobs:
             git -C "$ROOT" commit -m "research(v7): append complete source-and-hypothesis evidence [skip ci]"
             git -C "$ROOT" push origin "HEAD:refs/heads/$V7_EVIDENCE_BRANCH"
           fi
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/extended_flow/report.json
+          receipt: out/extended_flow/superlab.json
+      - name: Review aligned V7 statistical evidence with common gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/extended_flow/statistical_trials.json
+          receipt: out/extended_flow/superlab_statistics.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: eaverse-v7-${{ matrix.symbol }}-${{ github.run_id }}
           path: |
             out/extended_flow/report.json
+            out/extended_flow/superlab.json
+            out/extended_flow/superlab_statistics.json
             out/extended_flow/statistical_audit.json
             out/extended_flow/statistical_trials.json
           if-no-files-found: warn
@@ -234,11 +248,19 @@ jobs:
               f.write("\nNeither Kraken nor Coinbase is a drop-in substitute for Binance taker-flow history. ")
               f.write("No PAPER/LIVE confirmation or full Kraken historical ZIP downloaded.\n")
           PY
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/cross_venue/reference.json
+          receipt: out/cross_venue/superlab.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: eaverse-v7-independent-reference-${{ github.run_id }}
-          path: out/cross_venue/reference.json
+          path: |
+            out/cross_venue/reference.json
+            out/cross_venue/superlab.json
           if-no-files-found: warn
           retention-days: 90
       - name: Report runner capacity

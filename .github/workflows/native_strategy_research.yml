@@ -124,6 +124,18 @@ jobs:
             git -C "$ROOT" commit -m 'research(mesh): append native source observation [skip ci]'
             git -C "$ROOT" push origin HEAD:refs/heads/research/strategy-mesh-evidence
           fi
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/native_mesh/design_queue.json
+          receipt: out/native_mesh/superlab.json
+      - name: Review native source audit with common gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/native_mesh/source_audit.json
+          receipt: out/native_mesh/superlab_source.json
       - name: Upload independent study diagnostics (not trading signals)
         if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4

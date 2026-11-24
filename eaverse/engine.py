@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import coverage, data, events, foundry, qualification, research, universe
+from . import cohort, coverage, data, events, foundry, qualification, research, universe
 
 
 SCHEMA = """
@@ -364,6 +364,10 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             stale_listing = listing_asof is None or listing_asof < (now.date() - timedelta(days=3)).isoformat()
             health(db, f"listings:{market.name}", "live listing catalog unavailable or stale" if stale_listing else None)
             selected = universe.queue(db, market, symbols, now.date(), asset_limit or universe.LIMITS[market.name])
+            for symbol in reversed(cohort.active_assets(db, market)):
+                if symbol not in selected:
+                    # At most one extra research asset, never displace existing PAPER.
+                    selected.insert(0, symbol)
             queues.append((market, iter(selected)))
             market_reports[market.name] = {**listing, "universe": len(symbols), "scheduled": len(selected),
                                           "screened": 0, "unavailable": 0}
@@ -425,6 +429,16 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                             print(f"Foundry research error for {asset}: {exc}",flush=True)
                         finally:
                             db.execute("RELEASE foundry_research")
+                        if time.monotonic() < deadline - 30:
+                            db.execute("SAVEPOINT cohort_research")
+                            try:
+                                result["foundry_cohort"] = cohort.run_asset(db, asset, market, bars, now)
+                            except Exception as exc:
+                                db.execute("ROLLBACK TO cohort_research")
+                                result["foundry_cohort"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
+                                print(f"Cohort research error for {asset}: {exc}",flush=True)
+                            finally:
+                                db.execute("RELEASE cohort_research")
                         report["assets"][asset] = {**result, "paper": paper}
                         universe.record(db, market.name, symbol, now, None)
                         if tracked or symbol in market.symbols:

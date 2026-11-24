@@ -76,12 +76,20 @@ jobs:
           else
             echo 'NO_VERIFIED_HISTORICAL_INPUT: No manifest checked into research/pit_inputs; offline integrity tests only. This is NOT a historical backtest.' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/eaverse_pit_replay.json
+          receipt: out/eaverse_pit_superlab.json
       - name: Publish independent research-only evidence
         if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: eaverse-pit-research-${{ github.run_id }}
-          path: out/eaverse_pit_replay.json
+          path: |
+            out/eaverse_pit_replay.json
+            out/eaverse_pit_superlab.json
           if-no-files-found: ignore
           retention-days: 90
 
@@ -128,12 +136,20 @@ jobs:
             echo '::warning::BINANCE_ARCHIVE_NOT_VERIFIED; source unavailable/changed. NO HISTORICAL RESULTS; no fabricated fallback.'
             echo 'BINANCE_ARCHIVE_NOT_VERIFIED — historical replay blocked, NO source/PAPER promotion.' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Review source report with pinned common Superlab gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/binance_pit/report.json
+          receipt: out/binance_pit/superlab.json
       - name: Archive ONLY aggregated research results, never third-party raw bars
         if: steps.pilot.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: eaverse-real-binance-history-${{ github.run_id }}
-          path: out/binance_pit/report.json
+          path: |
+            out/binance_pit/report.json
+            out/binance_pit/superlab.json
           retention-days: 90
       - name: Report runner capacity
         if: always()
