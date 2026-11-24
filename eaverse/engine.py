@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import coverage, data, events, research, universe
+from . import coverage, data, events, foundry, qualification, research, universe
 
 
 SCHEMA = """
@@ -338,6 +338,8 @@ def fetch_bars(market, symbol, now):
 def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report=None):
     now = datetime.now(UTC)
     deadline = time.monotonic() + 14 * 60
+    first_technical = db.execute('SELECT coalesce(max(rowid),0) FROM attempts').fetchone()[0]
+    first_event = db.execute('SELECT coalesce(max(rowid),0) FROM event_trials').fetchone()[0]
     with db:
         update_pending_paper_policy(db, now)
         if os.getenv("GITHUB_ACTIONS") == "true":
@@ -414,6 +416,15 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                             print(f"Coverage research error for {asset}: {exc}", flush=True)
                         finally:
                             db.execute("RELEASE coverage_research")
+                        db.execute("SAVEPOINT foundry_research")
+                        try:
+                            result["foundry"] = foundry.run_asset(db, asset, market, bars, deadline)
+                        except Exception as exc:
+                            db.execute("ROLLBACK TO foundry_research")
+                            result["foundry"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
+                            print(f"Foundry research error for {asset}: {exc}",flush=True)
+                        finally:
+                            db.execute("RELEASE foundry_research")
                         report["assets"][asset] = {**result, "paper": paper}
                         universe.record(db, market.name, symbol, now, None)
                         if tracked or symbol in market.symbols:
@@ -440,7 +451,10 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             health(db, f"market:{name}", market_error)
     if daily_report:
         events.write_daily(daily_report, daily_records)
-    report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version<>?", (coverage.VERSION,)).fetchone()[0]
+    with db:
+        report["superlab_qualification"] = qualification.review_new(db, first_technical, first_event)
+    report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0]
+    report["foundry_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (foundry.VERSION,)).fetchone()[0]
     report["coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0]
     report["total_event_trials"] = db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0]
     report["paper"] = [

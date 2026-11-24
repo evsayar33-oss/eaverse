@@ -45,6 +45,20 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - name: Restore durable research state
         run: python -m eaverse.checkpoint restore
+      - name: Acquire pinned Superlab research-only qualification contract
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          PIN='a6096b8283a2e271bdbdb6dc2c4ad5b8313d0c7a'
+          ROOT="$RUNNER_TEMP/eaverse-qs-contract"
+          git init -q "$ROOT"
+          git -C "$ROOT" remote add origin https://github.com/evsayar33-oss/quant_superlab.git
+          git -C "$ROOT" fetch -q --depth=1 origin "$PIN"
+          git -C "$ROOT" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$ROOT" rev-parse HEAD)" = "$PIN"
+          echo "PYTHONPATH=$ROOT" >> "$GITHUB_ENV"
+          echo "EAVERSE_QS_CONTRACT_SHA=$PIN" >> "$GITHUB_ENV"
       - name: Discover, validate and advance PAPER simulations
         id: discover
         run: python -m eaverse.engine
