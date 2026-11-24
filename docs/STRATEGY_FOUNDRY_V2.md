@@ -1,13 +1,15 @@
 # Strategy foundry V2 — research only
 - Separate version coverage-2; no change to existing PAPER or coverage-1 identities.
 - Six bounded experiments per loaded asset visit across 1d/1w: parameter,
-  grammar and risk lanes. Outcome-independent seeded multidimensional
-  settings (not all mathematical combinations); 26 inherited signal families
+  grammar and risk lanes. Seeded multidimensional exploration alternates with joint mutation of
+  discovery-only parents (validation is never used for selection); frozen blocked
+  specs are retained for retry. Settings (not all mathematical combinations); 26 inherited signal families
   plus independently parameterized MACD, Bollinger, RSI, stochastic and ADX.
 - Grammar combines 2–6 rules using all/any/majority/ordered sequence/filter/
   weighted voting. Independent direction, confirmation and size settings.
 - ATR stop, take profit, trailing, time exit, partial TP and staged entry.
   Signal at completed bar, next open; trailing uses completed prior extremes,
+  monotonic trailing even when ATR expands,
   same-bar ambiguity stop first, stop gaps at open. No actual fill/borrow
   guarantees or tick reconstruction. 2x fees and assumed 5% short borrow.
 - Weekly compounded path for discovery and retrospective validation, with

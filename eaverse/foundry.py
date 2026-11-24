@@ -5,7 +5,7 @@ deterministic, outcome-independent search; no claim of an exhaustive domain.
 """
 from __future__ import annotations
 
-import itertools
+import json
 import math
 import os
 import random
@@ -67,6 +67,52 @@ def plan(asset, frame, lane, position):
             "logic":rng.choice(("all", "any", "majority", "sequence", "filter", "weighted")) if len(rules)>1 else "all",
             "direction":rng.choice(coverage.DIRECTIONS), "confirmation":rng.choice((1,2,3)),
             "size":rng.choice((.25,.5,1.)), "risk":risk}
+
+
+def adaptive_plan(db, asset, frame, lane, position):
+    """Every other parameter/grammar turn explores; the other mutates a
+    discovery-only parent. Validation metrics are never read for selection."""
+    spec=plan(asset,frame,lane,position)
+    if lane == "risk" or position % 2 == 0:
+        return spec
+    parents=[]
+    for row in db.execute("SELECT id,spec,discovered FROM attempts WHERE version=? AND asset=? AND family=? AND spec<>'' ORDER BY rowid DESC LIMIT 100",
+                          (VERSION,asset,"coverage:"+frame+":"+lane)):
+        report=json.loads(row["discovered"]).get("metrics",{})
+        if report.get("entries",0)>=2 and report.get("status")=="evaluated":
+            score=report["net"]-report["drawdown"]
+            parents.append((score,row["id"],json.loads(row["spec"])))
+    if not parents:
+        return spec
+    _,parent_id,parent=max(parents,key=lambda x:(x[0],x[1]))
+    rng=random.Random(research.digest([VERSION,asset,frame,lane,position,parent_id]))
+    # Jointly mutate two or more dimensions while keeping the original rule family.
+    slot=rng.randrange(len(parent["rules"]))
+    parent["rules"][slot]=choose_rule(frame,parent["rules"][slot][0],rng)
+    parent["confirmation"]=spec["confirmation"]
+    parent["size"]=spec["size"]
+    parent["direction"]=spec["direction"]
+    if lane=="grammar":
+        parent["logic"]=spec["logic"]
+        parent["risk"]=spec["risk"]
+    # Parent provenance is stored outside the trial identity.
+    return parent
+
+
+def warmup(spec):
+    spans=[coverage.warmup_for({"rules":[r for r in spec["rules"] if r[0] not in SPECIAL]}),
+           spec["risk"]["atr_window"]+3]
+    for rule in spec["rules"]:
+        name=rule[0]
+        if name=="macd_multi":
+            spans.append(rule[2]+rule[3]+3)
+        elif name=="adx_multi":
+            spans.append(2*rule[1]+2*rule[2]+3)
+        elif name=="stochastic_multi":
+            spans.append(rule[1]+rule[2]+3)
+        elif name in ("rsi_multi","bollinger_multi"):
+            spans.append(rule[1]+3)
+    return max(spans)
 
 
 def comparison(x, level, op):
@@ -181,6 +227,7 @@ def execute(bars, targets, start, stop, risk, cost_bps):
     entry = anchor = 0.
     held, entries, exits, partials, adds = 0,0,0,0,0
     took_profit, added = False,False
+    trailing_stop = None
     previous_signal, locked = 0,0
     path = []
     peak, dd = 1.,0.
@@ -194,11 +241,13 @@ def execute(bars, targets, start, stop, risk, cost_bps):
             order(-units,price)
             exits += 1
     def levels(a):
+        nonlocal trailing_stop
         sign = np.sign(units)
         stop_price = entry-sign*risk["stop"]*a if risk["stop"] is not None else None
         if risk["trail"] is not None:
             trailing = anchor-sign*risk["trail"]*a
-            stop_price = trailing if stop_price is None else (max(stop_price,trailing) if sign>0 else min(stop_price,trailing))
+            trailing_stop = trailing if trailing_stop is None else (max(trailing_stop,trailing) if sign>0 else min(trailing_stop,trailing))
+            stop_price = trailing_stop if stop_price is None else (max(stop_price,trailing_stop) if sign>0 else min(stop_price,trailing_stop))
         take = entry+sign*risk["tp"]*a if risk["tp"] is not None and not took_profit else None
         return stop_price,take
     for i in range(start,stop):
@@ -226,7 +275,7 @@ def execute(bars, targets, start, stop, risk, cost_bps):
                 break
             size = abs(target[i])*(.5 if risk["staged"] else 1.)
             order(want*equity*size/(o[i]*(1+fee)),o[i])
-            entry=anchor=o[i]; held=0; entries+=1; took_profit=False; added=False
+            entry=anchor=o[i]; held=0; entries+=1; took_profit=False; added=False; trailing_stop=None
         elif units and risk["staged"] and not added and not took_profit and held>=1 and np.sign(units)*(c[i-1]-entry)>=a and i<stop-1:
             equity = cash+units*o[i]
             extra = max(0.,equity*abs(target[i])/(1+fee)-abs(units)*o[i])
@@ -244,6 +293,8 @@ def execute(bars, targets, start, stop, risk, cost_bps):
             if sl is not None and sign*(adverse-sl)<=0:
                 # After new entry or changed ATR, stop may already be crossed at open.
                 close(min(o[i],sl) if sign>0 else max(o[i],sl)); locked=want
+            elif units<0 and cash+units*h[i]<=0:
+                path.append(-1.); dd=1.; break
             elif tp is not None and sign*(favorable-tp)>=0:
                 if risk["partial"]:
                     order(-units/2,tp); took_profit=True; partials+=1
@@ -277,6 +328,7 @@ def execute(bars, targets, start, stop, risk, cost_bps):
 def run_asset(db,asset,market,bars,deadline=None):
     db.execute(coverage.SCHEMA)
     db.execute(coverage.PENDING)
+    db.execute('CREATE TABLE IF NOT EXISTS foundry_frozen (asset TEXT,timeframe TEXT,lane TEXT,position INTEGER,spec TEXT,PRIMARY KEY(asset,timeframe,lane,position))')
     result={}
     for frame in coverage.FRAMES:
         current=bars if frame=="1d" else coverage.weekly(bars)
@@ -288,18 +340,21 @@ def run_asset(db,asset,market,bars,deadline=None):
             pos=row[0] if row else 0
             retry=db.execute("SELECT position FROM coverage_pending WHERE asset=? AND timeframe=? AND lane=? AND version=? ORDER BY checked,position LIMIT 1",args).fetchone()
             for offset,new in ([(retry[0],False)] if retry else [])+[(pos,True)]:
-                spec=plan(asset,frame,lane,offset)
+                frozen_args=(asset,frame,lane,offset)
+                frozen=db.execute('SELECT spec FROM foundry_frozen WHERE asset=? AND timeframe=? AND lane=? AND position=?',frozen_args).fetchone()
+                spec=json.loads(frozen[0]) if frozen else adaptive_plan(db,asset,frame,lane,offset)
                 ident=research.digest([VERSION,spec])
-                warmup=max(200 if any(r[0] in SPECIAL for r in spec["rules"]) else 22,
-                           coverage.warmup_for({"rules":[r for r in spec["rules"] if r[0] not in SPECIAL]}))
+                minimum=warmup(spec)
                 key=frame+":"+lane
-                if len(current)<warmup+120:
+                if len(current)<minimum+120:
                     from datetime import UTC,datetime
+                    db.execute('INSERT OR REPLACE INTO foundry_frozen VALUES (?,?,?,?,?)',(*frozen_args,research.canonical(spec)))
                     db.execute("INSERT OR REPLACE INTO coverage_pending VALUES (?,?,?,?,?,?,?)",(*args,offset,"blocked_history",datetime.now(UTC).isoformat()))
                     if new:
                         db.execute("INSERT OR REPLACE INTO coverage_cursor VALUES (?,?,?,?,?)",(*args,pos+1))
                     result[key]={"status":"blocked_history","position":offset}
                     continue
+                db.execute('DELETE FROM foundry_frozen WHERE asset=? AND timeframe=? AND lane=? AND position=?',frozen_args)
                 if db.execute("SELECT 1 FROM attempts WHERE version=? AND asset=? AND id=?",(VERSION,asset,ident)).fetchone():
                     if new:
                         db.execute("INSERT OR REPLACE INTO coverage_cursor VALUES (?,?,?,?,?)",(*args,pos+1))
@@ -307,9 +362,9 @@ def run_asset(db,asset,market,bars,deadline=None):
                         db.execute("DELETE FROM coverage_pending WHERE asset=? AND timeframe=? AND lane=? AND version=? AND position=?",(*args,offset))
                     result[key]={"status":"duplicate_not_counted","position":offset}
                     continue
-                boundary=warmup+(len(current)-warmup)*3//4
+                boundary=minimum+(len(current)-minimum)*3//4
                 target=desired(current,spec)
-                train,train_path=execute(current,target,warmup,boundary,spec["risk"],market.cost_bps)
+                train,train_path=execute(current,target,minimum,boundary,spec["risk"],market.cost_bps)
                 valid,valid_path=execute(current,target,boundary,len(current),spec["risk"],market.cost_bps)
                 ev={"discovery":train_path,"validation":valid_path}
                 ev["sha256"]=research.digest(ev)
