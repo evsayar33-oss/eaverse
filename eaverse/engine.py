@@ -38,6 +38,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_paper_per_asset ON paper(asset) WHERE stat
 CREATE TABLE IF NOT EXISTS paper_progress (
     sequence INTEGER PRIMARY KEY, metrics TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS paper_data_issues (asset TEXT PRIMARY KEY, error TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS health (
     asset TEXT PRIMARY KEY, failures INTEGER NOT NULL, episode INTEGER NOT NULL
 );
@@ -110,9 +111,10 @@ def update_pending_paper_policy(db, now):
 
 
 def recheck_pending(db, asset, market, bars, now):
-    """Replace a revised pre-opening proposal only after testing its frozen rules again."""
-    row = db.execute("SELECT * FROM paper WHERE asset=? AND status='active' AND cursor IS NULL AND start>?",
-                     (asset, now.date().isoformat())).fetchone()
+    """Requalify never-started experiments without retrospectively starting PAPER."""
+    row = db.execute("""SELECT * FROM paper WHERE asset=? AND status='active'
+                        AND cursor IS NULL AND sequence NOT IN (SELECT sequence FROM paper_progress)""",
+                     (asset,)).fetchone()
     if not row or row["version"] != research.VERSION or row["policy"] != research.canonical(research.POLICY):
         return
     window = bars.loc[row["anchor"]:row["cutoff"]]
@@ -134,14 +136,29 @@ def recheck_pending(db, asset, market, bars, now):
         if len(dates) < 180 or date(dates[0]) != block["start"] or date(dates[-1]) != block["end"]:
             return
         revised[label] = research.history_metrics(history, weights, dates, row["cost"], periods)
-    db.execute("UPDATE paper SET status='revised_before_start' WHERE sequence=?", (row["sequence"],))
-    if all(block["pass"] for block in revised.values()):
+    # A historical revision must not manufacture a prospective observation.
+    # Keep the original row and restart from a future opening, even if the
+    # previously scheduled opening has already elapsed.
+    from .reference import audit_validation
+    revised["validation"]["execution_audit"] = audit_validation(bars.loc[:row["cutoff"]], weights,
+                                                                  row["cost"], revised["validation"])
+    accepted = all(block["pass"] for block in revised.values()) and revised["validation"]["execution_audit"]["status"] != "mismatch"
+    evidence = {"reason": "origin_revision_before_first_observation", "revalidation": revised,
+                "checked_at": now.isoformat(), "replacement_eligible": accepted}
+    db.execute("UPDATE paper SET status='revised_before_start',result=? WHERE sequence=?",
+               (research.canonical(evidence), row["sequence"]))
+    if accepted:
+        start = max(row["start"], (now.date() + timedelta(days=1)).isoformat())
+        if market.calendar:
+            import exchange_calendars as xcals
+            start = date(xcals.get_calendar(market.calendar).date_to_session(start, direction="next"))
         anchor = history.iloc[-400:]
         origin.update(revised, replaces=row["sequence"], data_start=date(history.index[0]),
-                      data_sha256=data.fingerprint(history), code=os.getenv("GITHUB_SHA", "local"))
+                      data_sha256=data.fingerprint(history), code=os.getenv("GITHUB_SHA", "local"),
+                      recovery=evidence)
         db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
                       VALUES(?,?,?,?,?,?,?,?,?,?,'active')""",
-                   (asset,row["spec"],row["cost"],row["start"],date(anchor.index[0]),row["cutoff"],
+                   (asset,row["spec"],row["cost"],start,date(anchor.index[0]),row["cutoff"],
                     data.fingerprint(anchor),row["version"],row["policy"],research.canonical(origin)))
 
 
@@ -397,10 +414,29 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             if failure is None:
                 try:
                     with db:
-                        recheck_pending(db, asset, market, bars, now)
-                        paper = advance_paper(db, asset, bars)
-                        extend_active_history(db, asset, bars, market)
+                        paper, paper_error = None, None
+                        db.execute("SAVEPOINT paper_update")
+                        try:
+                            recheck_pending(db, asset, market, bars, now)
+                            paper = advance_paper(db, asset, bars)
+                            extend_active_history(db, asset, bars, market)
+                        except ValueError as exc:
+                            db.execute("ROLLBACK TO paper_update")
+                            if not tracked:
+                                raise
+                            paper_error = f"{type(exc).__name__}: {exc}"[:300]
+                            print(f"PAPER integrity hold for {asset}: {paper_error}", flush=True)
+                        finally:
+                            db.execute("RELEASE paper_update")
+                        if paper_error:
+                            db.execute("INSERT OR REPLACE INTO paper_data_issues VALUES (?,?)", (asset, paper_error))
+                        else:
+                            db.execute("DELETE FROM paper_data_issues WHERE asset=?", (asset,))
+                        # Valid current bars can support independent research even
+                        # when the frozen PAPER history cannot be reproduced.
                         result = discover(db, asset, market, bars, now, budget)
+                        if paper_error:
+                            result["paper_error"] = paper_error
                         if event_budget:
                             result["events"], daily = events.evaluate(
                                 db, asset, bars, event_dates, result["asof"], result["snapshot_sha256"],
@@ -442,7 +478,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                         report["assets"][asset] = {**result, "paper": paper}
                         universe.record(db, market.name, symbol, now, None)
                         if tracked or symbol in market.symbols:
-                            health(db, asset, None)
+                            health(db, asset, paper_error)
                     market_reports[market.name]["screened"] += 1
                 except ValueError as exc:
                     # A frozen PAPER data revision or incompatible engine is actionable.
@@ -455,6 +491,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 report["assets"][asset] = {"error": failure, "coverage": status}
                 with db:
                     universe.record(db, market.name, symbol, now, status)
+                    if tracked:
+                        db.execute("INSERT OR REPLACE INTO paper_data_issues VALUES (?,?)", (asset, failure))
                     if tracked or symbol in market.symbols:
                         health(db, asset, failure)
                 market_reports[market.name]["unavailable"] += 1
@@ -467,6 +505,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
         events.write_daily(daily_report, daily_records)
     with db:
         report["superlab_qualification"] = qualification.review_new(db, first_technical, first_event)
+    report["new_coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (coverage.VERSION, first_technical)).fetchone()[0]
+    report["new_foundry_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (foundry.VERSION, first_technical)).fetchone()[0]
     report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0]
     report["foundry_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (foundry.VERSION,)).fetchone()[0]
     report["coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0]
