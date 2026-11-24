@@ -86,3 +86,26 @@ class PanelTests(unittest.TestCase):
             self.assertIn("Net getiri", [item.label for item in app.metric])
             self.assertEqual(snapshot["research"]["total_trials"], 0)
             self.assertEqual(app.metric[0].value, "0")
+
+    def test_advanced_trials_and_persistent_error_are_visible(self):
+        with tempfile.TemporaryDirectory() as work:
+            db_path = Path(work) / "test.sqlite"
+            with engine.connect(db_path) as db:
+                for version in ("1", "coverage-1", "coverage-2"):
+                    db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                               (version, "US:A", "one", "sma", "", "", "", "", "", "", "{}"))
+                db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,'active')""",
+                           ("US:A", "{}", 10, "2026-11-23", "2025-01-01", "2026-11-20", "digest",
+                            research.VERSION, research.canonical(research.POLICY), "{}"))
+                db.execute("INSERT INTO paper_data_issues VALUES (?,?)", ("US:A", "frozen history mismatch"))
+            snapshot = panel.projection(db_path, {"time": datetime.now(UTC).isoformat(), "assets": {},
+                                                   "new_coverage_debt_trials": 1, "new_foundry_trials": 1},
+                                        "https://example.org/run")
+            counters = snapshot["research"]
+            self.assertEqual(counters["total_trials"], 1)
+            self.assertEqual(counters["all_technical_trials"], 3)
+            self.assertEqual(counters["coverage_debt_trials"], 1)
+            self.assertEqual(counters["foundry_trials"], 1)
+            self.assertTrue(snapshot["entries"][0]["data_paused"])
+            self.assertEqual(snapshot["entries"][0]["data_error"], "frozen history mismatch")
