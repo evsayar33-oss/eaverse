@@ -345,12 +345,12 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
         if os.getenv("GITHUB_ACTIONS") == "true":
             from . import ideas
             ideas.refresh(db)
-        event_dates, coverage = events.refresh(db, now.date()) if event_budget else ({}, {})
+        event_dates, event_coverage = events.refresh(db, now.date()) if event_budget else ({}, {})
         calendar_cutoffs = {}
         if event_budget:
             db.execute("INSERT OR IGNORE INTO event_calendar_versions VALUES (?,?)",
                        (research.digest(event_dates), research.canonical(event_dates)))
-            calendar_cutoffs = {name: item["fetched"] for name, item in coverage.items()}
+            calendar_cutoffs = {name: item["fetched"] for name, item in event_coverage.items()}
             stale_calendars = [name for name, limit in calendar_cutoffs.items()
                                if limit < (now.date() - timedelta(days=3)).isoformat()]
             health(db, "macro-calendar", "stale " + ", ".join(stale_calendars) if stale_calendars else None)
@@ -372,7 +372,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             market_reports[market.name] = {**listing, "universe": len(symbols), "scheduled": len(selected),
                                           "screened": 0, "unavailable": 0}
     report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}, "markets": market_reports,
-              "event_sources": coverage}
+              "event_sources": event_coverage}
     daily_records = []
     # Interleave providers and give active PAPER rows the first slots on their market.
     scheduled = []
