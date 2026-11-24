@@ -1,1 +1,1 @@
-Verify adjusted OHLC roundoff repair on the next autonomous research run.
+Run autonomous research after the prospective PAPER recovery and research-counter fix (PR 23, 2026-11-24); restore existing checkpoint, do not bootstrap.
