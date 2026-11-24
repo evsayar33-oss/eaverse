@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import checkpoint, research as research_engine
+from . import checkpoint, coverage, foundry, research as research_engine
 from .delivery import gh
 
 
@@ -40,7 +40,11 @@ def projection(db_path, report, run_url):
         db.row_factory = sqlite3.Row
         research = {
             "total_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
-            "coverage_debt_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version LIKE 'coverage-%'").fetchone()[0],
+            "coverage_debt_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0],
+            "foundry_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (foundry.VERSION,)).fetchone()[0],
+            "all_technical_trials": db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0],
+            "new_coverage_debt_trials": report.get("new_coverage_debt_trials"),
+            "new_foundry_trials": report.get("new_foundry_trials"),
             "unique_strategies": db.execute("SELECT COUNT(DISTINCT id) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
             "total_event_trials": db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0],
             "tested_assets": db.execute("SELECT COUNT(DISTINCT asset) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
@@ -64,13 +68,16 @@ def projection(db_path, report, run_url):
             ORDER BY paper.sequence DESC
         """):
             entry = {key: row[key] for key in ("sequence", "asset", "status", "start", "cursor", "cutoff", "cost")}
+            issue = db.execute("SELECT error FROM paper_data_issues WHERE asset=?", (row["asset"],)).fetchone()
+            error = assets.get(row["asset"], {}).get("paper_error") or assets.get(row["asset"], {}).get("error") or (issue[0] if issue else None)
             entry.update({
                 "execution_model": ({"max_leverage": 1, "direction": "long_only", "bar": "1d"}
                                     if row["version"] == research_engine.VERSION else None),
                 "spec": json.loads(row["spec"]), "policy": json.loads(row["policy"]),
                 "origin": json.loads(row["origin"]), "progress": json.loads(row["metrics"]) if row["metrics"] else None,
                 "result": json.loads(row["result"]) if row["result"] else None,
-                "data_paused": row["status"] == "active" and bool(assets.get(row["asset"], {}).get("error")),
+                "data_paused": row["status"] == "active" and bool(error),
+                "data_error": error if row["status"] == "active" else None,
             })
             longer = db.execute("SELECT result FROM extended_checks WHERE sequence=?", (row["sequence"],)).fetchone()
             entry["extended"] = json.loads(longer[0]) if longer else None
