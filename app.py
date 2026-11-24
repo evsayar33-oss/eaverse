@@ -123,7 +123,9 @@ def render_paper(item):
         st.caption(f"Hedefe kalan: {max(0, target - count)} getiri barı. "
                    "Hisselerde seans günleri, kriptoda takvim günleri sayılır; eksik veri süreyi uzatabilir.")
     if item["data_paused"]:
-        st.warning("Son turda veri veya PAPER sürekliliği doğrulanamadı. Son doğrulanmış ölçüm gösteriliyor.")
+        st.warning("Veri veya PAPER sürekliliği doğrulanamadı. Son doğrulanmış ölçüm gösteriliyor.")
+        if item.get("data_error"):
+            st.caption(item["data_error"])
     if progress.get("curve"):
         series = pd.DataFrame(progress["curve"]).rename(columns={"strategy": "Strateji", "benchmark": "Al-tut"})
         series["date"] = pd.to_datetime(series["date"])
@@ -179,6 +181,15 @@ def render_panel(payload):
         else:
             st.success(f"Son yayımlanan turda {research['new_trials']} teknik ve "
                        f"{research['new_event_trials']} olay denemesi kaydedildi.")
+        if "all_technical_trials" in research:
+            extra = st.columns(3)
+            extra[0].metric("Tüm teknik denemeler", research["all_technical_trials"])
+            extra[1].metric("Coverage denemeleri", research["coverage_debt_trials"],
+                            delta=None if research.get("new_coverage_debt_trials") is None else f"+{research['new_coverage_debt_trials']} son tur")
+            extra[2].metric("Foundry denemeleri", research["foundry_trials"],
+                            delta=None if research.get("new_foundry_trials") is None else f"+{research['new_foundry_trials']} son tur")
+            st.caption("Coverage ve Foundry ana teknik sayacına dahil değildir. Tüm teknik denemeler sayacı bunları da içerir. "
+                       "Bağımsız araştırma iş akışlarının kanıtları ayrı GitHub Actions raporlarındadır; planlanan testler sayılmaz.")
         st.caption("Sayaçlar tamamlanan araştırma kayıtlarından gelir; açık sayfa 5 dakikada bir yenilenir. "
                    "Deneme sayısı kârlı veya PAPER izlemeye uygun strateji sayısı değildir.")
         with st.expander("Varlık bazında denemeler"):
