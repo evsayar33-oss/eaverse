@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import data, events, research, universe
+from . import coverage, data, events, research, universe
 
 
 SCHEMA = """
@@ -403,6 +403,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                                 365 if market.calendar is None else 252, calendar_cutoffs,
                             )
                             daily_records.extend(daily)
+                        result["coverage_debt"] = coverage.run_asset(
+                            db, asset, market, bars, event_dates, calendar_cutoffs, deadline=deadline)
                         report["assets"][asset] = {**result, "paper": paper}
                         universe.record(db, market.name, symbol, now, None)
                         if tracked or symbol in market.symbols:
@@ -430,6 +432,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     if daily_report:
         events.write_daily(daily_report, daily_records)
     report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+    report["coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0]
     report["total_event_trials"] = db.execute("SELECT COUNT(*) FROM event_trials").fetchone()[0]
     report["paper"] = [
         dict(row) for row in db.execute("SELECT sequence,asset,start,cursor,status FROM paper ORDER BY sequence")
