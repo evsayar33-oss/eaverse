@@ -29,7 +29,10 @@ def choose(frame,name,rng):
 
 def warmup(rule):
     _,name,n,aux,*_=rule
-    return 2*n+2*aux+5 if name in ("adx","macd","cost_z","low_vol") else n+aux+5
+    if name=="macd": return max(n+1,aux)+min(n,aux)+5
+    if name in ("adx","cost_z","low_vol"): return n+aux+5
+    if name=="stoch_recovery": return n+min(aux,10)+5
+    return n+5
 
 def average(x,n,kind):
     if kind=="sma": return x.rolling(n).mean()

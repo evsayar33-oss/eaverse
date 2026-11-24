@@ -23,7 +23,7 @@ POLICY={"version":VERSION,"variants":VARIANTS,"forward_bars":FORWARD_BARS,
         "paper_eligible":False,"live_allowed":False}
 
 def code_hash():
-    return hashlib.sha256(b"".join(Path(m.__file__).read_bytes() for m in (foundry,surface))).hexdigest()
+    return hashlib.sha256(b"".join(Path(m.__file__).read_bytes() for m in (foundry,surface,data))).hexdigest()
 
 def week_groups(index):
     return index.to_period("W-SUN")
@@ -123,6 +123,8 @@ def run_asset(db,asset,market,bars,now):
         evidence["superlab"]=review_cohort(evidence)
     except ImportError:
         evidence["superlab"]={"status":"contract_unavailable"}
+    except ValueError as exc:
+        evidence["superlab"]={"status":"independent_reproduction_blocked","reason":str(exc)}
     anchor=bars.iloc[-max(400,foundry.warmup(evidence["selected_spec"])+10):]
     state={"anchor":str(anchor.index[0].date()),"observed_through":str(anchor.index[-1].date()),
            "observed_sha256":data.fingerprint(anchor),"registered_utc":now.isoformat(),

@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PIN='08d16f5d9ede60e73d3089e5890ae3f54cf5879e'
+          PIN='9517b971e92b18cf551e61682825e9e25fa802c7'
           ROOT="$RUNNER_TEMP/eaverse-qs-contract"
           git init -q "$ROOT"
           git -C "$ROOT" remote add origin https://github.com/evsayar33-oss/quant_superlab.git

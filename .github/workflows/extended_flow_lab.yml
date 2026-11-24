@@ -189,6 +189,12 @@ jobs:
         with:
           report: out/extended_flow/report.json
           receipt: out/extended_flow/superlab.json
+      - name: Review aligned V7 statistical evidence with common gate
+        if: always()
+        uses: ./.github/actions/superlab-report
+        with:
+          report: out/extended_flow/statistical_trials.json
+          receipt: out/extended_flow/superlab_statistics.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -196,6 +202,7 @@ jobs:
           path: |
             out/extended_flow/report.json
             out/extended_flow/superlab.json
+            out/extended_flow/superlab_statistics.json
             out/extended_flow/statistical_audit.json
             out/extended_flow/statistical_trials.json
           if-no-files-found: warn
