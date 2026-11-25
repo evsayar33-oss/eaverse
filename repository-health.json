@@ -1,15 +1,15 @@
 {
   "repository": "evsayar33-oss/eaverse",
-  "observed_at": "2026-11-24T17:47:01.010321+00:00",
+  "observed_at": "2026-11-25T17:14:07.524413+00:00",
   "metrics": {
-    "repository_bytes": 748544,
+    "repository_bytes": 768000,
     "cache_bytes": 0,
-    "artifact_bytes": 14449885,
-    "artifact_count": 111,
-    "release_count": 22,
-    "release_asset_bytes": 41018882,
-    "checkpoint_compressed_bytes": 9153915,
-    "checkpoint_uncompressed_bytes": 63139840
+    "artifact_bytes": 16254147,
+    "artifact_count": 125,
+    "release_count": 24,
+    "release_asset_bytes": 52060417,
+    "checkpoint_compressed_bytes": 12344081,
+    "checkpoint_uncompressed_bytes": 88883200
   },
   "alerts": [],
   "errors": [],
@@ -94,10 +94,18 @@
     {
       "id": 14937084153,
       "tag": "evidence-archive-29874168"
+    },
+    {
+      "id": 14975279401,
+      "tag": "evidence-archive-29950558"
+    },
+    {
+      "id": 15018646501,
+      "tag": "evidence-archive-30037293"
     }
   ],
   "billing_quota": "unknown: account billing permission required",
-  "archive_candidates": 4,
+  "archive_candidates": 2,
   "archive_pending": 0,
   "workflow_states": {
     ".github/workflows/causal_discovery.yml": "active",
