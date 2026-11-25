@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, coverage, data, events, foundry, qualification, research, universe
+from . import cohort, coverage, data, events, foundry, paper_archive, qualification, research, universe
 
 
 SCHEMA = """
@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS paper (
 CREATE UNIQUE INDEX IF NOT EXISTS one_paper_per_asset ON paper(asset) WHERE status = 'active';
 CREATE TABLE IF NOT EXISTS paper_progress (
     sequence INTEGER PRIMARY KEY, metrics TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_candle_archive (
+    sequence INTEGER NOT NULL, through_day TEXT NOT NULL, first_day TEXT NOT NULL,
+    source TEXT NOT NULL, recorded_at TEXT NOT NULL, prefix_sha256 TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(sequence,through_day)
 );
 CREATE TABLE IF NOT EXISTS paper_data_issues (asset TEXT PRIMARY KEY, error TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS health (
@@ -192,6 +197,10 @@ def advance_paper(db, asset, bars):
         raise ValueError("PAPER origin candles were revised or are missing")
     if row["cursor"] and data.fingerprint(anchored.loc[:row["cursor"]]) != row["history_digest"]:
         raise ValueError("previously observed PAPER candles were revised or are missing")
+    # Archive only an already verified prefix. This never rewrites PAPER or
+    # permits a source revision to pass the original digest checks.
+    verified_day = row["cursor"] or row["cutoff"]
+    paper_archive.capture(db, row, anchored.loc[:verified_day])
     observed = anchored.loc[row["start"]:]
     if not len(observed):
         return {"status": "waiting_for_next_open", "sequence": row["sequence"], "bars": 0}
@@ -220,6 +229,7 @@ def advance_paper(db, asset, bars):
         }
         db.execute("INSERT OR REPLACE INTO paper_progress VALUES (?,?)",
                    (row["sequence"], research.canonical(progress)))
+    paper_archive.capture(db, row, anchored.loc[:stop])
     db.execute("UPDATE paper SET cursor=?, history_digest=? WHERE sequence=?",
                (date(stop), data.fingerprint(anchored.loc[:stop]), row["sequence"]))
     if days < research.PAPER_BARS:
@@ -332,13 +342,16 @@ def discover(db, asset, market, bars, now, budget):
                       "data_start": date(bars.index[0]), "data_end": asof,
                       "history_cost_bps": 2 * market.cost_bps,
                       "discovery": discovery_report, "validation": validation}
-            db.execute(
+            inserted = db.execute(
                 """INSERT OR IGNORE INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
                    VALUES (?,?,?,?,?,?,?,?,?,?,'active')""",
                 (asset, research.canonical(spec), market.cost_bps, start, date(anchored.index[0]), asof,
                  data.fingerprint(anchored), research.VERSION, research.canonical(research.POLICY),
                  research.canonical(origin)),
             )
+            if inserted.rowcount:
+                frozen=db.execute("SELECT * FROM paper WHERE sequence=?", (inserted.lastrowid,)).fetchone()
+                paper_archive.capture(db, frozen, anchored)
     return {"new_trials": len(selected), "total_trials": len(records) + len(selected), "candidate": nominee,
             "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof, "paper_eligible": True}
 
