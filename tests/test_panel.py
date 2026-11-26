@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
-from eaverse import data, engine, metrics, panel, research
+from eaverse import data, engine, indicator_research, metrics, panel, research
 from test_research import market_frame
 
 
@@ -77,8 +77,10 @@ class PanelTests(unittest.TestCase):
                 app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
             self.assertFalse(app.exception)
             self.assertEqual([tab.label for tab in app.tabs], ["Güncel PAPER", "İzleme öncesi backtest"])
-            self.assertIn("+12,00%", app.dataframe[1].value["Keşif net"].values)
-            history = app.dataframe[3].value
+            discovery = next(d.value for d in app.dataframe if "Keşif net" in d.value.columns)
+            self.assertIn("+12,00%", discovery["Keşif net"].values)
+            history = next(d.value for d in app.dataframe if "Süre" in d.value.columns and
+                           any("366 takvim günü" in str(v) for v in d.value["Süre"]))
             self.assertIn("366 takvim günü", history.iloc[0]["Süre"])
             self.assertEqual(history.iloc[1]["Süre"], "Kayıt yok")
             self.assertEqual(paper["execution_model"]["max_leverage"], 1)
@@ -94,17 +96,23 @@ class PanelTests(unittest.TestCase):
                 for version in ("1", "coverage-1", "coverage-2"):
                     db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
                                (version, "US:A", "one", "sma", "", "", "", "", "", "", "{}"))
+                db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                           (indicator_research.VERSION, "US:A", "two", "indicator:1d:ichimoku",
+                            "", "", "", "", "", "", "{}"))
                 db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
                               VALUES(?,?,?,?,?,?,?,?,?,?,'active')""",
                            ("US:A", "{}", 10, "2026-11-23", "2025-01-01", "2026-11-20", "digest",
                             research.VERSION, research.canonical(research.POLICY), "{}"))
                 db.execute("INSERT INTO paper_data_issues VALUES (?,?)", ("US:A", "frozen history mismatch"))
             snapshot = panel.projection(db_path, {"time": datetime.now(UTC).isoformat(), "assets": {},
-                                                   "new_coverage_debt_trials": 1, "new_foundry_trials": 1},
+                                                   "new_coverage_debt_trials": 1, "new_foundry_trials": 1,
+                                                   "new_indicator_trials": 1},
                                         "https://example.org/run")
             counters = snapshot["research"]
             self.assertEqual(counters["total_trials"], 1)
-            self.assertEqual(counters["all_technical_trials"], 3)
+            self.assertEqual(counters["all_technical_trials"], 4)
+            self.assertEqual(counters["indicator_trials"], 1)
+            self.assertEqual(counters["indicator_counts"][0], {"indicator":"ichimoku","daily":1,"weekly":0,"total":1})
             self.assertEqual(counters["coverage_debt_trials"], 1)
             self.assertEqual(counters["foundry_trials"], 1)
             self.assertTrue(snapshot["entries"][0]["data_paused"])

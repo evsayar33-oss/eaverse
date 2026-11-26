@@ -1,1 +1,1 @@
-Run autonomous research after the prospective PAPER recovery and research-counter fix (PR 23, 2026-11-24); restore existing checkpoint, do not bootstrap.
+Run the expanded indicator bank after merge; restore existing durable research state, do not bootstrap (2026-11-26).
