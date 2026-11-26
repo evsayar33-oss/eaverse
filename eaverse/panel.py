@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import checkpoint, coverage, foundry, indicator_research, research as research_engine
+from . import checkpoint, combination_research, coverage, foundry, indicator_research, research as research_engine
 from .delivery import gh
 
 
@@ -42,6 +42,8 @@ def projection(db_path, report, run_url):
             "total_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
             "coverage_debt_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0],
             "foundry_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (foundry.VERSION,)).fetchone()[0],
+            "combination_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (combination_research.VERSION,)).fetchone()[0],
+            "new_combination_trials": report.get("new_combination_trials"),
             "indicator_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (indicator_research.VERSION,)).fetchone()[0],
             "new_indicator_trials": report.get("new_indicator_trials"),
             "indicator_counts": indicator_research.counts(db),
@@ -57,6 +59,13 @@ def projection(db_path, report, run_url):
                         "new_trials": assets.get(row[0], {}).get("new_trials", 0)}
                        for row in db.execute("SELECT asset,COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%' GROUP BY asset ORDER BY asset")],
         }
+        combo_coverage = combination_research.summary(db)
+        research["combination_coverage_rows"] = len(combo_coverage)
+        research["combination_external_sources"] = combination_research.external_scope()
+        # Keep the release projection bounded; the Actions report has the full ledger summary.
+        active_assets = set(assets)
+        research["combination_coverage"] = sorted(combo_coverage,
+            key=lambda row: (row["asset"] not in active_assets, row["asset"], row["frame"]))[:2000]
         research["direction_count"] = db.execute("SELECT count(*) FROM direction_checks").fetchone()[0]
         comparisons = []
         for asset, key, raw in db.execute("SELECT asset,id,result FROM direction_checks ORDER BY rowid DESC LIMIT 40"):

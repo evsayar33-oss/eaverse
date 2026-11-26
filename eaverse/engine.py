@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, coverage, data, events, foundry, indicator_research, paper_archive, qualification, research, universe
+from . import cohort, combination_research, coverage, data, events, foundry, indicator_research, paper_archive, qualification, research, universe
 
 
 SCHEMA = """
@@ -488,6 +488,17 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                             print(f"Indicator research error for {asset}: {exc}",flush=True)
                         finally:
                             db.execute("RELEASE indicator_research")
+                        db.execute("SAVEPOINT combination_research")
+                        try:
+                            result["combinations"] = combination_research.run_asset(
+                                db, asset, market, bars, event_dates, calendar_cutoffs,
+                                deadline=deadline, event_enabled=bool(event_budget))
+                        except Exception as exc:
+                            db.execute("ROLLBACK TO combination_research")
+                            result["combinations"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
+                            print(f"Combination research error for {asset}: {exc}",flush=True)
+                        finally:
+                            db.execute("RELEASE combination_research")
                         if time.monotonic() < deadline - 30:
                             db.execute("SAVEPOINT cohort_research")
                             try:
@@ -529,6 +540,10 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     with db:
         report["superlab_qualification"] = qualification.review_new(db, first_technical, first_event)
     report["new_coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (coverage.VERSION, first_technical)).fetchone()[0]
+    report["new_combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (combination_research.VERSION, first_technical)).fetchone()[0]
+    report["combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (combination_research.VERSION,)).fetchone()[0]
+    report["combination_coverage"] = combination_research.summary(db)
+    report["combination_external_sources"] = combination_research.external_scope()
     report["new_indicator_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (indicator_research.VERSION, first_technical)).fetchone()[0]
     report["indicator_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (indicator_research.VERSION,)).fetchone()[0]
     report["indicator_counts"] = indicator_research.counts(db)

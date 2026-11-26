@@ -188,7 +188,7 @@ def render_panel(payload):
                             delta=None if research.get("new_coverage_debt_trials") is None else f"+{research['new_coverage_debt_trials']} son tur")
             extra[2].metric("Foundry denemeleri", research["foundry_trials"],
                             delta=None if research.get("new_foundry_trials") is None else f"+{research['new_foundry_trials']} son tur")
-            st.caption("Coverage, Foundry ve genişletilmiş indikatörler ana teknik sayacına dahil değildir. Tüm teknik denemeler sayacı bunları da içerir. "
+            st.caption("Coverage, Foundry, genişletilmiş indikatörler ve ortak kombinasyonlar ana teknik sayacına dahil değildir. Tüm teknik denemeler sayacı bunları da içerir. "
                        "Bağımsız araştırma iş akışlarının kanıtları ayrı GitHub Actions raporlarındadır; planlanan testler sayılmaz.")
         if "indicator_trials" in research:
             st.metric("Genişletilmiş indikatör denemeleri", research["indicator_trials"],
@@ -199,6 +199,29 @@ def render_panel(payload):
                 st.dataframe(pd.DataFrame(research["indicator_counts"]).rename(columns={
                     "indicator":"İndikatör", "daily":"Günlük", "weekly":"Haftalık", "total":"Toplam"
                 }), hide_index=True)
+        if "combination_trials" in research:
+            st.metric("Ortak kombinasyon denemeleri", research["combination_trials"],
+                      delta=None if research.get("new_combination_trials") is None else f"+{research['new_combination_trials']} son tur")
+            with st.expander("Varlık bazında kombinasyon kapsamı ve bekleyen borç"):
+                st.caption("Kayıtlı tasarımlar tamamlanan backtest değildir. Teorik katalog çok büyüktür; "
+                           "parametre keşfi ayrıca sürer. Veri/olay eksikliği olan tasarımlar tamamlanmış sayılmaz.")
+                rows=research.get("combination_coverage",[])
+                if rows:
+                    st.dataframe(pd.DataFrame(rows).rename(columns={
+                        "asset":"Varlık","frame":"Zaman dilimi","covered_templates":"Kapsanan tasarım",
+                        "registered_templates":"Kayıtlı tasarım","not_covered":"Henüz kapsanmayan",
+                        "blocked":"Veri/örneklem bekleyen","settings_attempted":"Ek ayar tasarımı kapsanan",
+                        "settings_blocked":"Ayar bekleyen","core_covered":"Temel kapsanan",
+                        "core_registered":"Temel kayıtlı","core_not_covered":"Temel kalan",
+                        "core_blocked":"Temel bekleyen"}),hide_index=True)
+                    if len(rows)<research.get("combination_coverage_rows",0):
+                        st.caption("Panel ilk 2.000 satırla sınırlıdır. Tam özet araştırma Actions raporundadır.")
+                else:
+                    st.info("Henüz ortak kombinasyon kuyruğu çalışmadı.")
+                external=research.get("combination_external_sources",[])
+                if external:
+                    st.caption("Aşağıdaki kaynaklar ayrı iş akışındadır; ortak OHLCV kuyruğunda tamamlanmış kombinasyon sayılmaz.")
+                    st.dataframe(pd.DataFrame(external),hide_index=True)
         st.caption("Sayaçlar tamamlanan araştırma kayıtlarından gelir; açık sayfa 5 dakikada bir yenilenir. "
                    "Deneme sayısı kârlı veya PAPER izlemeye uygun strateji sayısı değildir.")
         with st.expander("Varlık bazında denemeler"):
