@@ -59,6 +59,8 @@ def projection(db_path, report, run_url):
                         "new_trials": assets.get(row[0], {}).get("new_trials", 0)}
                        for row in db.execute("SELECT asset,COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%' GROUP BY asset ORDER BY asset")],
         }
+        research["markets"] = report.get("markets",{})
+        research["history_summary"] = report.get("history_summary",{})
         research["archived_outcomes"] = archive.outcome_counts(db)
         research["combination_focus"] = combination_focus.dashboard(db)
         research["combination_focus_slice"] = report.get("combination_focus_slice",{})

@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from itertools import zip_longest
 from pathlib import Path
 from urllib.request import Request, urlopen
+
+from . import history_sources
 
 
 NASDAQ = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
 NASDAQ_SCREEN = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000"
 SEC = "https://www.sec.gov/files/company_tickers_exchange.json"
 KAP = "https://www.kap.org.tr/tr/bist-sirketler"
+BIST_ETF = "https://www.borsaistanbul.com/katilim-finans/katilim-esasli-byfler"
 COINBASE = "https://api.exchange.coinbase.com/products"
 LIMITS = {"US": 40, "BIST": 32, "CRYPTO": 24}
 REFERENCE = Path(__file__).parent / "reference_data"
@@ -28,7 +34,10 @@ def bundled_us():
 def read_url(url):
     request = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; Eaverse research)"})
     with urlopen(request, timeout=12) as response:
-        return response.read(5 * 1024 * 1024).decode("utf-8-sig")
+        raw=response.read(history_sources.MAX_RESPONSE+1)
+    if len(raw)>history_sources.MAX_RESPONSE:
+        raise ValueError("listing response exceeds size cap")
+    return raw.decode("utf-8-sig")
 
 
 def nasdaq_symbols(raw):
@@ -65,9 +74,23 @@ def sec_symbols(raw):
 
 
 def kap_symbols(raw):
-    return {f"{code}.IS" for code in re.findall(
-        r'<a href="/tr/sirket-bilgileri/ozet/[^"]+"><div>([A-Z][A-Z0-9]{1,9})</div>', raw
-    )}
+    symbols=set()
+    for cell in re.findall(r'<a href="/tr/sirket-bilgileri/ozet/[^"]+"><div>(.*?)</div>', raw, re.S):
+        for code in re.split(r"[\s,;/]+",html.unescape(re.sub(r"<[^>]+>","",cell)).strip()):
+            if re.fullmatch(r"[A-Z][A-Z0-9]{1,9}",code):
+                symbols.add(code+".IS")
+    return symbols
+
+
+def bist_etf_symbols(raw):
+    # Borsa Istanbul reports participation ETF instrument codes ending in .F.
+    # Yahoo candidates are validated against actual price bars before research.
+    output=set()
+    for cell in re.findall(r"<td(?:\s[^>]*)?>(.*?)</td>",raw,re.S|re.I):
+        code=html.unescape(re.sub(r"<[^>]+>","",cell)).strip()
+        if re.fullmatch(r"[A-Z][A-Z0-9]{1,9}\.F",code):
+            output.add(code[:-2]+".IS")
+    return output
 
 
 def coinbase_symbols(raw):
@@ -79,49 +102,108 @@ def coinbase_symbols(raw):
     }
 
 
+SOURCE_SCHEMA = """CREATE TABLE IF NOT EXISTS listing_sources(
+ market TEXT NOT NULL,source TEXT NOT NULL,checked TEXT NOT NULL,asof TEXT,symbols TEXT,error TEXT,
+ PRIMARY KEY(market,source))"""
+SEEN_SCHEMA = """CREATE TABLE IF NOT EXISTS listing_seen(
+ market TEXT NOT NULL,symbol TEXT NOT NULL,first_seen TEXT NOT NULL,last_seen TEXT NOT NULL,
+ PRIMARY KEY(market,symbol))"""
+
+
+def source_definitions(name):
+    if name=="US":
+        return ((SEC,sec_symbols,1000),(NASDAQ_SCREEN,nasdaq_screen_symbols,1000),(NASDAQ,nasdaq_symbols,1000))
+    if name=="BIST":
+        return ((KAP,kap_symbols,300),(BIST_ETF,bist_etf_symbols,1))
+    return ((COINBASE,coinbase_symbols,50),)+tuple(
+        (url,lambda raw,v=venue:history_sources.venue_symbols(v,json.loads(raw)),20)
+        for venue,url in history_sources.LIST_ENDPOINTS.items())
+
+
 def fetch(name):
-    if name == "US":
-        for url, parse in ((SEC, sec_symbols), (NASDAQ_SCREEN, nasdaq_screen_symbols), (NASDAQ, nasdaq_symbols)):
-            try:
-                symbols = parse(read_url(url))
-                if len(symbols) >= 1000:
-                    return url, symbols
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-        raise ValueError("SEC and Nasdaq listing feeds unavailable")
-    if name == "BIST":
-        return KAP, kap_symbols(read_url(KAP))
-    return COINBASE, coinbase_symbols(read_url(COINBASE))
+    def one(entry):
+        url,parse,minimum=entry
+        try:
+            symbols=parse(read_url(url))
+            if len(symbols)<minimum:
+                raise ValueError(f"only {len(symbols)} listing symbols; expected {minimum}")
+            return url,symbols,None
+        except (OSError,ValueError,KeyError,TypeError,IndexError) as exc:
+            return url,None,f"{type(exc).__name__}: {exc}"[:200]
+    # Do not stop at the first successful directory. Independent caches mean
+    # a provider outage cannot discard another provider's last observed list.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        return list(executor.map(one,source_definitions(name)))
 
 
 def refresh(db, market, today):
-    row = db.execute("SELECT * FROM listings WHERE market=?", (market.name,)).fetchone()
-    error = None
-    if row is None or row["checked"] != today.isoformat():
+    db.execute(SOURCE_SCHEMA)
+    db.execute(SEEN_SCHEMA)
+    stamp=today.isoformat()
+    legacy=db.execute("SELECT * FROM listings WHERE market=?",(market.name,)).fetchone()
+    # Migrate only a known individual source; keep its actual observation date.
+    if legacy and legacy["symbols"] and legacy["asof"] and legacy["source"] in {url for url,_,_ in source_definitions(market.name)}:
+        inserted=db.execute("INSERT OR IGNORE INTO listing_sources VALUES (?,?,?,?,?,NULL)",
+            (market.name,legacy["source"],"",legacy["asof"],legacy["symbols"]))
+        if inserted.rowcount:
+            db.executemany("INSERT OR IGNORE INTO listing_seen VALUES (?,?,?,?)",
+                [(market.name,s,legacy["asof"],legacy["asof"]) for s in json.loads(legacy["symbols"])])
+    have=db.execute("SELECT count(*) FROM listing_sources WHERE market=? AND checked=?",(market.name,stamp)).fetchone()[0]
+    error=None
+    if have<len(source_definitions(market.name)):
         try:
-            source, fetched = fetch(market.name)
-            minimum = {"US": 1000, "BIST": 300, "CRYPTO": 50}[market.name]
-            if len(fetched) < minimum:
-                raise ValueError(f"listing feed yielded {len(fetched)} symbols, expected at least {minimum}")
-            db.execute("INSERT OR REPLACE INTO listings VALUES (?,?,?,?,?)",
-                       (market.name, source, today.isoformat(), today.isoformat(), json.dumps(sorted(fetched))))
-            row = db.execute("SELECT * FROM listings WHERE market=?", (market.name,)).fetchone()
-        except (OSError, ValueError, KeyError, IndexError) as exc:
-            error = f"{type(exc).__name__}: {exc}"[:200]
-            if row:
-                db.execute("UPDATE listings SET checked=? WHERE market=?", (today.isoformat(), market.name))
-    catalog = set(json.loads(row["symbols"])) if row else set()
-    if not catalog and market.name == "US":
-        captured, catalog = bundled_us()
-        return sorted(catalog.union(market.symbols)), {
-            "source": SEC, "listing_date": captured, "listed": len(catalog), "listing_error": error,
-            "coverage_mode": "bundled_snapshot",
-        }
+            results=fetch(market.name)
+        except (OSError,ValueError,KeyError,TypeError,IndexError) as exc:
+            results=[]
+            error=f"{type(exc).__name__}: {exc}"[:200]
+        for url,symbols,issue in results:
+            if symbols is not None:
+                db.execute("INSERT OR REPLACE INTO listing_sources VALUES (?,?,?,?,?,NULL)",
+                           (market.name,url,stamp,stamp,json.dumps(sorted(symbols))))
+                db.executemany("""INSERT INTO listing_seen VALUES (?,?,?,?)
+                    ON CONFLICT(market,symbol) DO UPDATE SET last_seen=excluded.last_seen""",
+                    [(market.name,s,stamp,stamp) for s in sorted(symbols)])
+            else:
+                db.execute("""INSERT INTO listing_sources VALUES (?,?,?,NULL,NULL,?)
+                    ON CONFLICT(market,source) DO UPDATE SET checked=excluded.checked,error=excluded.error""",
+                    (market.name,url,stamp,issue))
+    rows=list(db.execute("SELECT * FROM listing_sources WHERE market=? ORDER BY source",(market.name,)))
+    catalog=set()
+    sources=[]
+    for row in rows:
+        symbols=set(json.loads(row["symbols"])) if row["symbols"] else set()
+        catalog.update(symbols)
+        sources.append({"source":row["source"],"asof":row["asof"],"listed":len(symbols),"error":row["error"],
+                        "status":"live" if row["asof"]==stamp and not row["error"] else "cached" if symbols else "unavailable"})
+    # Seed pre-upgrade cache only when its source did not return a fresh list.
+    # Never label old candidates as live or relabel a delisted identity.
+    if legacy and legacy["symbols"] and not catalog:
+        old=set(json.loads(legacy["symbols"]))
+        catalog.update(old)
+        if old:
+            sources.append({"source":legacy["source"],"asof":legacy["asof"],"listed":len(old),"error":error,"status":"legacy_cached"})
+    if not catalog and market.name=="US":
+        captured,catalog=bundled_us()
+        sources.append({"source":"bundled_nasdaq_snapshot","asof":captured,"listed":len(catalog),"error":error,"status":"bundled_snapshot"})
+    available=[s for s in sources if s["asof"] and s["listed"]]
+    live=[s for s in available if s["status"]=="live"]
+    date=max((s["asof"] for s in available),default=None)
+    mode=("live" if live and len(live)==len(sources) else "partial_live" if live else
+          "bundled_snapshot" if any(s["status"]=="bundled_snapshot" for s in sources) else "cached" if catalog else "seed_symbols")
+    if catalog and date:
+        db.execute("INSERT OR REPLACE INTO listings VALUES (?,?,?,?,?)",
+                   (market.name,"multi-source" if len(available)>1 else available[0]["source"],date,stamp,json.dumps(sorted(catalog))))
+    # Only actually observed listing dates contribute to this history; lifetime
+    # counts are not a backfilled delist-aware universe.
+    seen={r[0] for r in db.execute("SELECT symbol FROM listing_seen WHERE market=?",(market.name,))}
+    issues=[s["error"] for s in sources if s["error"]]
+    error=error or ("; ".join(issues)[:500] if issues else None)
     return sorted(catalog.union(market.symbols)), {
-        "source": row["source"] if row else None,
-        "listing_date": row["asof"] if row else None,
-        "listed": len(catalog), "listing_error": error,
-        "coverage_mode": ("live" if row["asof"] == today.isoformat() else "cached") if catalog else "seed_symbols",
+        "source":"multi-source" if len(available)>1 else available[0]["source"] if available else None,
+        "listing_date":date,"listed":len(catalog),"listing_error":error,"coverage_mode":mode,
+        "sources":sources,"observed_listing_symbols":len(seen),
+        "historical_listing_candidates_not_price_verified":len(seen-catalog),
+        "point_in_time_history_complete":False,
     }
 
 
@@ -140,7 +222,12 @@ def queue(db, market, symbols, today, limit):
     slots = max(0, limit - len(active))
     known = [item for item in pool if item in progress and progress[item]["error"] is None]
     revisit = known[:slots // 4]
-    rotating = [item for item in pool if item not in revisit][:slots-len(revisit)]
+    remaining=[item for item in pool if item not in revisit]
+    if market.name=="CRYPTO":
+        groups=[[s for s in remaining if ":" not in s]]
+        groups.extend([s for s in remaining if s.startswith(venue+":")] for venue in history_sources.VENUES)
+        remaining=[v for row in zip_longest(*groups) for v in row if v is not None]
+    rotating = remaining[:slots-len(revisit)]
     return active + revisit + rotating
 
 
