@@ -181,6 +181,20 @@ def render_panel(payload):
         else:
             st.success(f"Son yayımlanan turda {research['new_trials']} teknik ve "
                        f"{research['new_event_trials']} olay denemesi kaydedildi.")
+        if research.get("markets"):
+            with st.expander("Varlık evreni ve doğrulanan geçmiş", expanded=True):
+                coverage=research.get("history_summary",{})
+                st.dataframe([{"Piyasa":name,"Aday":row["universe"],"Son tur doğrulanan":row["screened"],
+                               "Doğrulanmış geçmiş (varlık)":coverage.get(name,{}).get("validated_assets",0),
+                               "6 yıldan uzun":coverage.get(name,{}).get("over_six_years",0),
+                               "En eski doğrulanmış gün":coverage.get(name,{}).get("oldest_verified_bar"),
+                               "En uzun günlük seri":coverage.get(name,{}).get("largest_validated_series",0)}
+                              for name,row in research["markets"].items()],hide_index=True)
+                st.caption("Aday listesi fiyat doğrulaması değildir. Kripto borsa/parite kimlikleri ayrıdır. "
+                           "Geçmiş kapsamı, her varlık için son başarılı doğrulamanın kaydıdır; delist edilmiş tüm varlıkları kapsamaz.")
+                sources=[{"Piyasa":name,**source} for name,row in research["markets"].items() for source in row.get("sources",[])]
+                if sources:
+                    st.dataframe(sources,hide_index=True)
         if "all_technical_trials" in research:
             extra = st.columns(3)
             extra[0].metric("Tüm teknik denemeler", research["all_technical_trials"])

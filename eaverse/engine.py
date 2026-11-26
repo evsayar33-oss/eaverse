@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, combination_focus, combination_research, coverage, data, events, foundry, indicator_research, paper_archive, qualification, research, universe
+from . import cohort, combination_focus, combination_research, coverage, data, events, foundry, history_sources, indicator_research, paper_archive, qualification, research, universe
 
 
 SCHEMA = """
@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS synthesis_parents (
     PRIMARY KEY(asset,id)
 );
 CREATE INDEX IF NOT EXISTS synthesis_score ON synthesis_parents(score DESC);
+CREATE TABLE IF NOT EXISTS history_coverage (
+    asset TEXT NOT NULL, source TEXT NOT NULL, checked TEXT NOT NULL,
+    first_bar TEXT NOT NULL, last_bar TEXT NOT NULL, bars INTEGER NOT NULL,
+    status TEXT NOT NULL, snapshot TEXT NOT NULL,
+    PRIMARY KEY(asset,source)
+);
 CREATE TABLE IF NOT EXISTS history_archives (
     sha TEXT PRIMARY KEY, url TEXT NOT NULL, records INTEGER NOT NULL
 );
@@ -331,7 +337,7 @@ def discover(db, asset, market, bars, now, budget):
                    (research.canonical(validation), research.VERSION, asset, key))
         nominee = {"id": key, "spec": spec, "validation": validation}
         active_count = db.execute("SELECT count(*) FROM paper WHERE status='active'").fetchone()[0]
-        if validation["pass"] and validation["execution_audit"]["status"] != "mismatch" and active_count < 12:
+        if market.source in ("coinbase","yahoo") and validation["pass"] and validation["execution_audit"]["status"] != "mismatch" and active_count < 12:
             start = (now.date() + timedelta(days=1)).isoformat()
             if market.calendar:
                 import exchange_calendars as xcals
@@ -353,12 +359,16 @@ def discover(db, asset, market, bars, now, budget):
                 frozen=db.execute("SELECT * FROM paper WHERE sequence=?", (inserted.lastrowid,)).fetchone()
                 paper_archive.capture(db, frozen, anchored)
     return {"new_trials": len(selected), "total_trials": len(records) + len(selected), "candidate": nominee,
-            "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof, "paper_eligible": True}
+            "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof,
+            "paper_eligible": market.source in ("coinbase","yahoo"),
+            "history":{"source":market.source,"bars":len(bars),"from":date(bars.index[0]),"through":asof,
+                       "status":bars.attrs.get("history_status","legacy_or_fixture"),
+                       "requested_start":bars.attrs.get("requested_start")}}
 
 
 def fetch_bars(market, symbol, now):
     try:
-        return data.load(market, symbol, now), None
+        return history_sources.load(market, symbol, now), None
     except Exception as exc:
         # The provider can raise transport and parsing errors from several libraries.
         # Strategy/evidence errors are handled separately and never hidden here.
@@ -466,6 +476,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             report["combination_focus_slice"]=result
             report["assets"].setdefault(focus_asset,{})["combinations"]=result
     focus_done=False
+    scheduled=[(history_sources.market_for_symbol(market,symbol),symbol) for market,symbol in scheduled]
     for batch_start in range(0, len(scheduled), 6):
         if time.monotonic() > deadline or (time.monotonic() > general_deadline and not paper_remaining):
             report["deferred_for_runtime"] = len(scheduled) - batch_start
@@ -553,6 +564,10 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                                 print(f"Cohort research error for {asset}: {exc}",flush=True)
                             finally:
                                 db.execute("RELEASE cohort_research")
+                        record=result["history"]
+                        db.execute("INSERT OR REPLACE INTO history_coverage VALUES (?,?,?,?,?,?,?,?)",
+                            (asset,record["source"],now.isoformat(),record["from"],record["through"],
+                             record["bars"],record["status"],result["snapshot_sha256"]))
                         report["assets"][asset] = {**result, "paper": paper}
                         universe.record(db, market.name, symbol, now, None)
                         if tracked or symbol in market.symbols:
@@ -583,6 +598,17 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             general_deadline=deadline
     if focus_asset and not focus_done:
         execute_focus()
+    report["history_summary"]={}
+    for name in market_reports:
+        rows=[dict(r) for r in db.execute("SELECT * FROM history_coverage WHERE asset LIKE ?",(name+":%",))]
+        counts={}
+        for r in rows:
+            counts[r["source"]]=counts.get(r["source"],0)+1
+        report["history_summary"][name]={
+            "validated_assets":len(rows),"oldest_verified_bar":min((r["first_bar"] for r in rows),default=None),
+            "largest_validated_series":max((r["bars"] for r in rows),default=0),
+            "over_six_years":sum((datetime.fromisoformat(r["last_bar"])-datetime.fromisoformat(r["first_bar"])).days>2192 for r in rows),
+            "by_source":counts,"last_observation_only":True}
     report["combination_focus"]=combination_focus.dashboard(db)
     with db:
         for name, outcome in market_reports.items():
