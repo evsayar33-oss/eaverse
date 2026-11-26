@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import checkpoint, coverage, foundry, research as research_engine
+from . import checkpoint, coverage, foundry, indicator_research, research as research_engine
 from .delivery import gh
 
 
@@ -42,6 +42,9 @@ def projection(db_path, report, run_url):
             "total_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0],
             "coverage_debt_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (coverage.VERSION,)).fetchone()[0],
             "foundry_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (foundry.VERSION,)).fetchone()[0],
+            "indicator_trials": db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (indicator_research.VERSION,)).fetchone()[0],
+            "new_indicator_trials": report.get("new_indicator_trials"),
+            "indicator_counts": indicator_research.counts(db),
             "all_technical_trials": db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0],
             "new_coverage_debt_trials": report.get("new_coverage_debt_trials"),
             "new_foundry_trials": report.get("new_foundry_trials"),

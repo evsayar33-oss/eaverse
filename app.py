@@ -177,7 +177,7 @@ def render_panel(payload):
                    "Aynı stratejinin farklı varlıklardaki testleri ayrı denemedir. Farklı strateji ayarı "
                    "tekrarsız kural ve parametre birleşimlerini sayar. Arşivlenen denemeler toplama dahildir.")
         if research["new_trials"] + research["new_event_trials"] == 0:
-            st.warning("Son yayımlanan turda yeni deneme kaydedilmedi.")
+            st.warning("Son yayımlanan turda yeni ana teknik veya olay denemesi kaydedilmedi.")
         else:
             st.success(f"Son yayımlanan turda {research['new_trials']} teknik ve "
                        f"{research['new_event_trials']} olay denemesi kaydedildi.")
@@ -188,8 +188,17 @@ def render_panel(payload):
                             delta=None if research.get("new_coverage_debt_trials") is None else f"+{research['new_coverage_debt_trials']} son tur")
             extra[2].metric("Foundry denemeleri", research["foundry_trials"],
                             delta=None if research.get("new_foundry_trials") is None else f"+{research['new_foundry_trials']} son tur")
-            st.caption("Coverage ve Foundry ana teknik sayacına dahil değildir. Tüm teknik denemeler sayacı bunları da içerir. "
+            st.caption("Coverage, Foundry ve genişletilmiş indikatörler ana teknik sayacına dahil değildir. Tüm teknik denemeler sayacı bunları da içerir. "
                        "Bağımsız araştırma iş akışlarının kanıtları ayrı GitHub Actions raporlarındadır; planlanan testler sayılmaz.")
+        if "indicator_trials" in research:
+            st.metric("Genişletilmiş indikatör denemeleri", research["indicator_trials"],
+                      delta=None if research.get("new_indicator_trials") is None else f"+{research['new_indicator_trials']} son tur")
+            st.caption("Bu denemeler yalnızca tarihsel araştırmadır; birleşik kurallar ayrı sayılır. "
+                       "Veri yetersizliği veya yinelenen denemeler sayaçlara eklenmez.")
+            with st.expander("İndikatör bazında tamamlanan denemeler"):
+                st.dataframe(pd.DataFrame(research["indicator_counts"]).rename(columns={
+                    "indicator":"İndikatör", "daily":"Günlük", "weekly":"Haftalık", "total":"Toplam"
+                }), hide_index=True)
         st.caption("Sayaçlar tamamlanan araştırma kayıtlarından gelir; açık sayfa 5 dakikada bir yenilenir. "
                    "Deneme sayısı kârlı veya PAPER izlemeye uygun strateji sayısı değildir.")
         with st.expander("Varlık bazında denemeler"):

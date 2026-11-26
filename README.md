@@ -21,6 +21,8 @@ Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Canlı ABD li
 - Varlık başına bir turda en fazla 24 yeni teknik deneme yapılır. Deneme kimlikleri tekrarları önlemek için saklanır. Aday seçimi keşif dönemine dayanır. Üç kronolojik bölümde çift maliyet ve gecikme uygulanır. Aday daha yakın 180 günlük pencerede yeniden taranır. Tarihsel dönemler tekrar kullanılabilir ve bu tarama ileri tarihli kanıtın öncesindeki elemedir.
 - Kripto adayında kural, maliyet, veri parmak izi ve ilk sanal işlem tarihi sabitlenir. Bir varlıkta aynı anda bir PAPER deneyi ve depoda en fazla 12 aktif PAPER deneyi olabilir. Piyasanın günlük kapanışı yayımlandıktan sonra bir bar beklenir. PAPER doğrulaması 90 getiri barı, en az sekiz tamamlanmış işlem, çift maliyet sonrası nakit ve al-tut kıyaslarının aşılması, en fazla %25 düşüş ve çoklu testleri hesaba katan ön kayıtlı yaklaşık HAC eşiği ister.
 
+Yeni [24 aileli genişletilmiş indikatör araştırması](docs/INDICATOR_RESEARCH_V1.md) günlük ve haftalık tekli/çoklu deneyleri kendi kalıcı kuyruğunda yürütür. Tamamlanan testler panelde ayrı sayaçlarla yayımlanır; mevcut PAPER denemeleri değişmez.
+
 ## Haber ve takvim deneyleri
 
 ABD TÜFE, ÜFE, istihdam, GSYH, kişisel gelir ve harcamalar (PCE), JOLTS ve perakende satış açıklamaları ile FOMC kararları taranır. BLS ve Fed arşivleri ile St. Louis Fed'in ALFRED yayımlanma tarihleri kullanılır. Kaynak kesintisi uzarsa olay testi bilinen arşiv tarihinde biter. Her piyasanın ilk uygun işlem açılışından başlayarak takip eden birinci, ikinci ve üçüncü işlem günleri ayrı sınanır. Veri, duyuru günü açılışının sonradan bilinen haberle etkilenmesini önlemek için bu açılışı testin dışında bırakır.
