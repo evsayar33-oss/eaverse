@@ -327,6 +327,20 @@ def run_asset(db, asset, market, bars, event_dates, cutoffs, *, deadline=None):
             candidates = ([(retry[0], False)] if retry else []) + ([(position, True)] if position < count else [])
             for offset, is_new in candidates:
                 spec = plan(frame, lane, offset)
+                identity = research.digest([VERSION, spec])
+                # A durable key survives compaction. Check it before any
+                # eligibility or backtest work, including a recovered cursor.
+                if db.execute("SELECT 1 FROM attempts WHERE version=? AND asset=? AND id=?",
+                              (VERSION, asset, identity)).fetchone():
+                    if is_new:
+                        position += 1
+                        db.execute("INSERT OR REPLACE INTO coverage_cursor VALUES (?,?,?,?,?)", (*args, position))
+                    else:
+                        db.execute("DELETE " + pending_query + " AND position=?", (*args, offset))
+                        pending -= 1
+                    status.update(status="duplicate_not_counted", completed=position-pending,
+                                  pending=pending, scheduled=position, id=identity)
+                    break
                 sample, blocked = eligible(current, spec, event_dates, cutoffs)
                 if blocked:
                     db.execute("INSERT OR REPLACE INTO coverage_pending VALUES (?,?,?,?,?,?,?)",
@@ -342,7 +356,6 @@ def run_asset(db, asset, market, bars, event_dates, cutoffs, *, deadline=None):
                 weights = desired(sample, spec, event_dates, 365 if market.calendar is None else 252)
                 discovery = evaluate_fold(sample, weights, warmup, boundary, market.cost_bps)
                 validation = evaluate_fold(sample, weights, boundary, len(sample), market.cost_bps)
-                identity = research.digest([VERSION, spec])
                 event = spec["event"][0] if lane == "macro" else None
                 record = {"pass": False, "coverage_only": True, "status": discovery["status"],
                           "metrics": discovery, "paper_eligible": False,

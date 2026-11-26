@@ -223,6 +223,23 @@ def render_panel(payload):
                 if external:
                     st.caption("Aşağıdaki kaynaklar ayrı iş akışındadır; ortak OHLCV kuyruğunda tamamlanmış kombinasyon sayılmaz.")
                     st.dataframe(pd.DataFrame(external),hide_index=True)
+        if "archived_outcomes" in research:
+            outcomes = research["archived_outcomes"]
+            with st.expander("Arşivlenen denemeler ve başarısızlık hafızası"):
+                summary_cols = st.columns(3)
+                summary_cols[0].metric("Arşivlenen", outcomes["archived"])
+                summary_cols[1].metric("Olumsuz tarihsel sonuç", outcomes["negative"])
+                summary_cols[2].metric("İşlem kanıtı yok", outcomes["no_trade_evidence"])
+                st.caption("Aynı varlık, araştırma sürümü ve strateji kimliği tekrar çalıştırılmaz. "
+                           "Negatif etiketi yalnızca gözlenen tarihsel sonucu belirtir; "
+                           "başka ayarlara veya varlıklara aktarılmaz. Eski arşivlerin sonucu bilinmiyorsa negatif sayılmaz.")
+                if outcomes["assets"]:
+                    st.dataframe(pd.DataFrame(outcomes["assets"]).rename(columns={
+                        "asset":"Varlık","archived":"Arşivlenen","negative":"Olumsuz",
+                        "no_trade_evidence":"İşlem kanıtı yok","other":"Diğer",
+                        "unknown":"Eski/belirsiz/geçersiz kanıt"}), hide_index=True)
+                if len(outcomes["assets"]) < outcomes["asset_rows"]:
+                    st.caption("Varlık tablosu ilk 2.000 satırla sınırlıdır; üst sayaçlar tüm kayıtları içerir.")
         st.caption("Sayaçlar tamamlanan araştırma kayıtlarından gelir; açık sayfa 5 dakikada bir yenilenir. "
                    "Deneme sayısı kârlı veya PAPER izlemeye uygun strateji sayısı değildir.")
         with st.expander("Varlık bazında denemeler"):
