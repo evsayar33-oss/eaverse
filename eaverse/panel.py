@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import archive, checkpoint, combination_research, coverage, foundry, indicator_research, research as research_engine
+from . import archive, checkpoint, combination_focus, combination_research, coverage, foundry, indicator_research, research as research_engine
 from .delivery import gh
 
 
@@ -60,6 +60,8 @@ def projection(db_path, report, run_url):
                        for row in db.execute("SELECT asset,COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%' GROUP BY asset ORDER BY asset")],
         }
         research["archived_outcomes"] = archive.outcome_counts(db)
+        research["combination_focus"] = combination_focus.dashboard(db)
+        research["combination_focus_slice"] = report.get("combination_focus_slice",{})
         combo_coverage = combination_research.summary(db)
         research["combination_coverage_rows"] = len(combo_coverage)
         research["combination_external_sources"] = combination_research.external_scope()
