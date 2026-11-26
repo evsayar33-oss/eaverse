@@ -202,6 +202,18 @@ def render_panel(payload):
         if "combination_trials" in research:
             st.metric("Ortak kombinasyon denemeleri", research["combination_trials"],
                       delta=None if research.get("new_combination_trials") is None else f"+{research['new_combination_trials']} son tur")
+            focus = research.get("combination_focus",{})
+            if focus:
+                last = research.get("combination_focus_slice",{})
+                st.info(f"Odak varlık: {focus.get('active_asset') or last.get('asset') or 'Sıradaki seçim bekleniyor'}")
+                stamp = last.get("foundation_total",{})
+                if stamp:
+                    fc = st.columns(3)
+                    fc[0].metric("Temel denenen", stamp["evaluated"])
+                    fc[1].metric("Temel bekleyen", stamp["blocked"])
+                    fc[2].metric("Temel henüz ziyaret edilmeyen", stamp["unvisited"])
+                    st.caption("Temel tasarım taraması ile tüm astronomik kombinasyonların tamamlanması farklıdır. "
+                               "Veri borcu kalıcıdır; büyük kombinasyon ve ayar araştırması da devam eder.")
             with st.expander("Varlık bazında kombinasyon kapsamı ve bekleyen borç"):
                 st.caption("Kayıtlı tasarımlar tamamlanan backtest değildir. Teorik katalog çok büyüktür; "
                            "parametre keşfi ayrıca sürer. Veri/olay eksikliği olan tasarımlar tamamlanmış sayılmaz.")

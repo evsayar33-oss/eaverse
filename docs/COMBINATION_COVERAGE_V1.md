@@ -32,10 +32,9 @@ değiştirilmez.
 
 ## Süre ve kayıt koruması
 
-Her varlık/zaman diliminin ayrı kalıcı rank göstergesi vardır. Her ziyarette
-iki teknik ve olay araştırması açıksa bir olay/karma kuyruk slotu kullanılır.
-Çiftler ve temel kombinasyonlar, çok büyük tasarım katmanlarından bağımsız
-ve daha sık ilerler. Sıra varlık bazında bijektif permütasyonla değişir;
+Her varlık/zaman diliminin ayrı kalıcı rank göstergesi vardır. Ortak katalog
+artık aynı anda tek bir odak varlıkta ilerler. Çiftler ve temel kombinasyonlar,
+çok büyük tasarım katmanlarından bağımsız ve daha sık ilerler. Sıra varlık bazında bijektif permütasyonla değişir;
 performans sonucuna göre bir aile dışlanmaz. Yeni iş akışı veya ücret yok;
 mevcut yürütme süresi sınırı uygulanır.
 
@@ -98,3 +97,26 @@ değildir. Eski etiketsiz arşivler, her turda bir dosya hash ve kayıt sayısı
 araştırmasında çeyrek kimliğin parçasıdır; yeni çeyrek yeni tasarımdır.
 Bu süreç başka varlıkları, ayarları veya yeni araştırma sürümlerini
 karalisteye almaz; PAPER ve LIVE kararları değişmez.
+
+
+## Kalıcı tek varlık odak kuyruğu
+
+Ana ortak kombinasyon işçisi, öncelikle seed listesindeki BTC-USD ile başlar
+(katalogda varsa), sonra piyasalara dönüşümlü yayılır. Normal keşif, bağımsız
+kaynak işleri ve PAPER takibi sürer. Aktif PAPER işlenince odak araştırmasına
+her mevcut ana turda en fazla 180 saniye ve 2.048 kuyruk slotu ayrılır;
+14 dakikalık araştırma bütçesi korunur, gerçek throughput veri ve işlem
+maliyetine bağlıdır. Odak veri seti aynı tur içinde yeniden indirilmez.
+Dört slottan sonra bir genişletme slotu verilir; tekli gösterge/olay,
+ikili, karma, büyük alt küme ve ayar şeritleri ayrı kalıcı ranklarla ilerler.
+
+Aynı varlık sonraki turlarda kalır: günlük 22.339 ve haftalık 18.601 temel
+tasarımın ziyaret edilmemiş **uygulanabilir** kısmı bitmeden başka bir odak
+varlığa geçilmez. Eksik geçmiş/olay kaynağı ve engellenen ranklar hiçbir
+zaman tamamlanmış test sayılmaz. Temel şeritler tarandığında veya gerekli
+veri yoksa varlık açık borçla askıya alınabilir; kalan borç, zaman dilimi,
+durum ve dönüş tarihi saklanır. Periyodik tekrar seçimleri eski varlıklara
+dönerek veri borcuna, daha büyük kombinasyonlara ve ayarlara devam eder.
+Temel taramanın bitmesi tüm matematiksel kataloğun tamamlanması değildir.
+Tüm mevcut ranklar ve başarısızlık kimlikleri korunur. Panelde odak,
+değerlendirilen/engellenen/henüz ziyaret edilmemiş temel tasarımlar gösterilir.

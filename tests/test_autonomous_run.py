@@ -19,7 +19,7 @@ class AutonomousRunTests(unittest.TestCase):
                 patch.object(engine.events, "refresh", return_value=(dates, calendar)), \
                 patch.object(engine.universe, "refresh", return_value=(["BTC-USD"], {"listing_date": day})), \
                 patch.object(engine, "fetch_bars", return_value=(bars, None)):
-            report = engine.run(db, [market.name], 3, event_budget=1, asset_limit=1)
+            report = engine.run(db, [market.name], 3, event_budget=1, asset_limit=1, focus_slots=16)
             result = report["assets"]["CRYPTO:BTC-USD"]
             self.assertEqual(report["event_sources"], calendar)
             self.assertGreater(report["coverage_debt_trials"], 0)
@@ -28,12 +28,28 @@ class AutonomousRunTests(unittest.TestCase):
             self.assertGreater(report["new_indicator_trials"], 0)
             self.assertEqual(result["indicators"]["1d"]["status"], "evaluated")
             self.assertGreater(report["new_combination_trials"],0)
-            self.assertEqual(result["combinations"]["1d"]["bank_pair"]["status"],"evaluated")
-            self.assertEqual(result["combinations"]["1d"]["cross_pair"]["status"],"evaluated")
+            self.assertEqual(result["combinations"]["asset"],"CRYPTO:BTC-USD")
+            self.assertGreater(result["combinations"]["evaluated"],0)
+            self.assertEqual(report["combination_focus"]["active_asset"],"CRYPTO:BTC-USD")
             self.assertTrue(report["combination_coverage"])
             self.assertNotEqual(result["coverage_debt"].get("status"), "error")
             self.assertNotEqual(result["foundry"].get("status"), "error")
             self.assertNotEqual(result["foundry_cohort"].get("status"), "error")
+
+    def test_only_focus_asset_receives_common_combinations(self):
+        bars=market_frame(2000)
+        market=data.MARKETS[0]
+        day=bars.index[-1].date().isoformat()
+        with engine.connect(":memory:") as db, patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}), \
+                patch.object(engine.universe,"refresh",return_value=(["BTC-USD","ETH-USD"],{"listing_date":day})), \
+                patch.object(engine,"fetch_bars",return_value=(bars,None)):
+            report=engine.run(db,[market.name],1,event_budget=0,asset_limit=2,focus_slots=12)
+            self.assertEqual(report["combination_focus_slice"]["asset"],"CRYPTO:BTC-USD")
+            self.assertIn("CRYPTO:ETH-USD",report["assets"])
+            self.assertNotIn("combinations",report["assets"]["CRYPTO:ETH-USD"])
+            self.assertGreater(report["assets"]["CRYPTO:ETH-USD"]["new_trials"],0)
+            assets=db.execute("SELECT DISTINCT asset FROM attempts WHERE version=?",(engine.combination_research.VERSION,)).fetchall()
+            self.assertEqual([row[0] for row in assets],["CRYPTO:BTC-USD"])
 
     def test_disabled_events_still_run_coverage(self):
         with engine.connect(":memory:") as db, patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
@@ -92,7 +108,7 @@ class AutonomousRunTests(unittest.TestCase):
                 patch.object(engine, "fetch_bars", return_value=(bars, None)):
             old = self.seed_unstarted(db, bars, "CRYPTO:BTC-USD", "2025-04-01")
             db.execute("UPDATE paper SET cursor=? WHERE sequence=?", ("2025-04-02", old["sequence"]))
-            report = engine.run(db, [market.name], 3, event_budget=0, asset_limit=1)
+            report = engine.run(db, [market.name], 3, event_budget=0, asset_limit=1, focus_slots=8)
             result = report["assets"][old["asset"]]
             self.assertIn("origin candles", result["paper_error"])
             self.assertGreater(result["new_trials"], 0)

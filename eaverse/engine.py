@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, combination_research, coverage, data, events, foundry, indicator_research, paper_archive, qualification, research, universe
+from . import cohort, combination_focus, combination_research, coverage, data, events, foundry, indicator_research, paper_archive, qualification, research, universe
 
 
 SCHEMA = """
@@ -365,7 +365,8 @@ def fetch_bars(market, symbol, now):
         return None, f"{type(exc).__name__}: {exc}"[:300]
 
 
-def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report=None):
+def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report=None, *,
+        focus_seconds=combination_focus.SECONDS, focus_slots=combination_focus.MAX_SLOTS):
     now = datetime.now(UTC)
     deadline = time.monotonic() + 14 * 60
     first_technical = db.execute('SELECT coalesce(max(rowid),0) FROM attempts').fetchone()[0]
@@ -385,6 +386,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                                if limit < (now.date() - timedelta(days=3)).isoformat()]
             health(db, "macro-calendar", "stale " + ", ".join(stale_calendars) if stale_calendars else None)
         queues = []
+        catalogs = {}
         market_reports = {}
         for market in data.MARKETS:
             if market.name not in market_names:
@@ -398,9 +400,33 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 if symbol not in selected:
                     # At most one extra research asset, never displace existing PAPER.
                     selected.insert(0, symbol)
-            queues.append((market, iter(selected)))
+            catalogs[market.name] = symbols
+            queues.append((market, selected))
             market_reports[market.name] = {**listing, "universe": len(symbols), "scheduled": len(selected),
                                           "screened": 0, "unavailable": 0}
+        focus_asset,focus_mode=combination_focus.select(db,catalogs,now.date())
+        if focus_asset:
+            name,symbol=focus_asset.split(":",1)
+            for market,selected in queues:
+                if market.name==name:
+                    priority={r[0].split(":",1)[1] for r in db.execute(
+                        "SELECT asset FROM paper WHERE status='active' AND asset LIKE ?",(name+":%",))}
+                    priority.update(cohort.active_assets(db,market))
+                    if symbol not in priority:
+                        if symbol in selected:
+                            selected.remove(symbol)
+                        offset=sum(s in priority for s in selected)
+                        selected.insert(offset,symbol)
+                    elif symbol not in selected:
+                        selected.insert(0,symbol)
+                    market_reports[name]["scheduled"]=len(selected)
+    queues=[(market,iter(selected)) for market,selected in queues]
+    # Reserve a bounded focus slice; active PAPER is still allowed its
+    # original deadline. The broad discovery engines retain their schedules.
+    general_deadline=deadline-focus_seconds if focus_asset else deadline
+    paper_remaining={r[0] for r in db.execute("SELECT asset FROM paper WHERE status='active'")
+                     if r[0].split(":",1)[0] in catalogs}
+    focus_data=None
     report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}, "markets": market_reports,
               "event_sources": event_coverage}
     daily_records = []
@@ -414,8 +440,34 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 scheduled.append((market, symbol))
                 next_round.append((market, queue))
         queues = next_round
+    def execute_focus():
+        if focus_data is None:
+            report["combination_focus_slice"]={"asset":focus_asset,"status":"deferred_runtime"}
+        elif focus_data[2] is not None:
+            delay=7 if any(term in focus_data[2] for term in ("fewer than 600","insufficient Coinbase history")) else 1
+            with db:
+                stamp=combination_focus.release(db,focus_asset,"waiting_source",now.date(),delay)
+            report["combination_focus_slice"]={"asset":focus_asset,"status":"waiting_source",
+                                               "reason":focus_data[2],"foundation_total":stamp}
+        else:
+            market,bars,_=focus_data
+            try:
+                with db:
+                    result=combination_focus.batch(db,focus_asset,market,bars,event_dates,calendar_cutoffs,
+                        deadline=min(deadline,time.monotonic()+focus_seconds),max_slots=focus_slots,
+                        event_enabled=bool(event_budget),mode=focus_mode)
+                    combination_focus.complete_slice(db,focus_asset,result,now.date())
+            except Exception as exc:
+                print(f"Combination focus error for {focus_asset}: {exc}",flush=True)
+                with db:
+                    stamp=combination_focus.release(db,focus_asset,"error",now.date())
+                result={"asset":focus_asset,"status":"error","error":f"{type(exc).__name__}: {exc}"[:300],
+                        "foundation_total":stamp}
+            report["combination_focus_slice"]=result
+            report["assets"].setdefault(focus_asset,{})["combinations"]=result
+    focus_done=False
     for batch_start in range(0, len(scheduled), 6):
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or (time.monotonic() > general_deadline and not paper_remaining):
             report["deferred_for_runtime"] = len(scheduled) - batch_start
             break
         batch = scheduled[batch_start:batch_start+6]
@@ -424,6 +476,9 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
         for (market, symbol), (bars, failure) in zip(batch, prices):
             asset = f"{market.name}:{symbol}"
             tracked = db.execute("SELECT 1 FROM paper WHERE asset=? AND status='active'", (asset,)).fetchone()
+            paper_remaining.discard(asset)
+            if asset==focus_asset:
+                focus_data=(market,bars,failure)
             if failure is None:
                 try:
                     with db:
@@ -462,7 +517,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                         db.execute("SAVEPOINT coverage_research")
                         try:
                             result["coverage_debt"] = coverage.run_asset(
-                                db, asset, market, bars, event_dates, calendar_cutoffs, deadline=deadline)
+                                db, asset, market, bars, event_dates, calendar_cutoffs, deadline=general_deadline)
                         except Exception as exc:
                             db.execute("ROLLBACK TO coverage_research")
                             result["coverage_debt"] = {"status": "error", "error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -471,7 +526,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                             db.execute("RELEASE coverage_research")
                         db.execute("SAVEPOINT foundry_research")
                         try:
-                            result["foundry"] = foundry.run_asset(db, asset, market, bars, deadline)
+                            result["foundry"] = foundry.run_asset(db, asset, market, bars, general_deadline)
                         except Exception as exc:
                             db.execute("ROLLBACK TO foundry_research")
                             result["foundry"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
@@ -481,25 +536,14 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                         # Keep new indicators separate from legacy PAPER and cohort identities.
                         db.execute("SAVEPOINT indicator_research")
                         try:
-                            result["indicators"] = indicator_research.run_asset(db, asset, market, bars, deadline)
+                            result["indicators"] = indicator_research.run_asset(db, asset, market, bars, general_deadline)
                         except Exception as exc:
                             db.execute("ROLLBACK TO indicator_research")
                             result["indicators"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
                             print(f"Indicator research error for {asset}: {exc}",flush=True)
                         finally:
                             db.execute("RELEASE indicator_research")
-                        db.execute("SAVEPOINT combination_research")
-                        try:
-                            result["combinations"] = combination_research.run_asset(
-                                db, asset, market, bars, event_dates, calendar_cutoffs,
-                                deadline=deadline, event_enabled=bool(event_budget))
-                        except Exception as exc:
-                            db.execute("ROLLBACK TO combination_research")
-                            result["combinations"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
-                            print(f"Combination research error for {asset}: {exc}",flush=True)
-                        finally:
-                            db.execute("RELEASE combination_research")
-                        if time.monotonic() < deadline - 30:
+                        if time.monotonic() < general_deadline - 30:
                             db.execute("SAVEPOINT cohort_research")
                             try:
                                 result["foundry_cohort"] = cohort.run_asset(db, asset, market, bars, now)
@@ -531,6 +575,15 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                         health(db, asset, failure)
                 market_reports[market.name]["unavailable"] += 1
             print(asset, "coverage error" if failure else "screened", flush=True)
+        # Once active PAPER has been advanced, spend the reserved slice on
+        # the same focus asset before the remaining broad rotation.
+        if focus_asset and not focus_done and focus_data is not None and not paper_remaining:
+            execute_focus()
+            focus_done=True
+            general_deadline=deadline
+    if focus_asset and not focus_done:
+        execute_focus()
+    report["combination_focus"]=combination_focus.dashboard(db)
     with db:
         for name, outcome in market_reports.items():
             market_error = "no symbols could be screened" if not outcome["screened"] and outcome["unavailable"] else None
