@@ -210,10 +210,11 @@ def render_panel(payload):
                     st.dataframe(pd.DataFrame(rows).rename(columns={
                         "asset":"Varlık","frame":"Zaman dilimi","covered_templates":"Kapsanan tasarım",
                         "registered_templates":"Kayıtlı tasarım","not_covered":"Henüz kapsanmayan",
+                        "unvisited_templates":"Henüz denenmeyen","coverage_complete":"Katalog tamamlandı",
                         "blocked":"Veri/örneklem bekleyen","settings_attempted":"Ek ayar tasarımı kapsanan",
                         "settings_blocked":"Ayar bekleyen","core_covered":"Temel kapsanan",
                         "core_registered":"Temel kayıtlı","core_not_covered":"Temel kalan",
-                        "core_blocked":"Temel bekleyen"}),hide_index=True)
+                        "core_blocked":"Temel bekleyen","core_unvisited":"Temel henüz denenmeyen"}),hide_index=True)
                     if len(rows)<research.get("combination_coverage_rows",0):
                         st.caption("Panel ilk 2.000 satırla sınırlıdır. Tam özet araştırma Actions raporundadır.")
                 else:
