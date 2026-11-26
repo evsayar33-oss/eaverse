@@ -77,3 +77,24 @@ Bunlar ana günlük/haftalık OHLCV kataloguna kanıtlanmamış bir join ile
 dahil edilmez. Açık kalan kanallar ayrı kaynak kapsamı tablosunda gösterilir;
 bunlar tamamlanmış karma test olarak sayılmaz. Bu sürüm bu kaynakların
 eksik tarihsel kapsamını tamamlamaz.
+
+
+## Olumsuz sonuç hafızası ve arşiv
+
+Tamamlanmış bir çalışmanın (araştırma sürümü, varlık, strateji kimliği)
+anahtarı kalıcıdır; arşivleme sonrası da aynı kimlik yeniden test edilmez.
+Eksik veri/örneklem nedeniyle engellenen adaylar bundan farklıdır.
+Eski olumsuz sonuçlar (gerçek keşif/doğrulama kapısı reddi, tarihsel negatif
+getiri veya iflas stresi) ve işlem kanıtı olmayan kayıtlar 256'lık eşikte
+daha erken arşivlenir. Diğer tamamlanmış ayrıntılar 30.000 kayıt veya
+16 MiB ayrıntı eşiğinde arşivlenir; tur başına en fazla dört parti işlenir.
+Büyük getiri yolları ve tam kurallar, hash ile doğrulanmış sıkıştırılmış
+GitHub Release dosyalarında korunur; ancak başarılı yükleme sonrası yerel
+ayrıntılar kaldırılır ve SQLite fiziksel alanı boşaltılır. Anahtar, sürüm,
+varlık, tarih, veri/kod referansı, sonuç etiketi ve özet metrikler kalır.
+Foundry'nin keşif ebeveynlerini seçmek için kullandığı kural ve keşif
+ölçümleri de korunur. Araştırma amaçlı `pass=false` tek başına başarısızlık
+değildir. Eski etiketsiz arşivler, her turda bir dosya hash ve kayıt sayısı doğrulanarak yeniden indekslenene kadar belirsiz olarak raporlanır. Legacy takvim
+araştırmasında çeyrek kimliğin parçasıdır; yeni çeyrek yeni tasarımdır.
+Bu süreç başka varlıkları, ayarları veya yeni araştırma sürümlerini
+karalisteye almaz; PAPER ve LIVE kararları değişmez.
