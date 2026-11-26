@@ -23,6 +23,8 @@ Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Canlı ABD li
 
 Yeni [24 aileli genişletilmiş indikatör araştırması](docs/INDICATOR_RESEARCH_V1.md) günlük ve haftalık tekli/çoklu deneyleri kendi kalıcı kuyruğunda yürütür. Tamamlanan testler panelde ayrı sayaçlarla yayımlanır; mevcut PAPER denemeleri değişmez.
 
+[Ortak kombinasyon kapsamı](docs/COMBINATION_COVERAGE_V1.md) yeni ve eski teknik aileleri, takvim, makro ve OHLCV olaylarını varlık bazlı kalıcı kuyrukta çapraz sınar. Kayıtlı, tamamlanan ve bekleyen kapsam ayrı raporlanır.
+
 ## Haber ve takvim deneyleri
 
 ABD TÜFE, ÜFE, istihdam, GSYH, kişisel gelir ve harcamalar (PCE), JOLTS ve perakende satış açıklamaları ile FOMC kararları taranır. BLS ve Fed arşivleri ile St. Louis Fed'in ALFRED yayımlanma tarihleri kullanılır. Kaynak kesintisi uzarsa olay testi bilinen arşiv tarihinde biter. Her piyasanın ilk uygun işlem açılışından başlayarak takip eden birinci, ikinci ve üçüncü işlem günleri ayrı sınanır. Veri, duyuru günü açılışının sonradan bilinen haberle etkilenmesini önlemek için bu açılışı testin dışında bırakır.
