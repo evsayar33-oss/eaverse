@@ -1,17 +1,19 @@
 {
   "repository": "evsayar33-oss/eaverse",
-  "observed_at": "2026-11-25T17:14:07.524413+00:00",
+  "observed_at": "2026-11-26T16:55:47.531585+00:00",
   "metrics": {
-    "repository_bytes": 768000,
+    "repository_bytes": 772096,
     "cache_bytes": 0,
-    "artifact_bytes": 16254147,
-    "artifact_count": 125,
-    "release_count": 24,
-    "release_asset_bytes": 52060417,
-    "checkpoint_compressed_bytes": 12344081,
-    "checkpoint_uncompressed_bytes": 88883200
+    "artifact_bytes": 18506243,
+    "artifact_count": 129,
+    "release_count": 27,
+    "release_asset_bytes": 73263675,
+    "checkpoint_compressed_bytes": 17505101,
+    "checkpoint_uncompressed_bytes": 130408448
   },
-  "alerts": [],
+  "alerts": [
+    "checkpoint_uncompressed_bytes: warning budget projected in 11.3 days (linear estimate)"
+  ],
   "errors": [],
   "repaired": [],
   "archives": [
@@ -102,10 +104,22 @@
     {
       "id": 15018646501,
       "tag": "evidence-archive-30037293"
+    },
+    {
+      "id": 15052776498,
+      "tag": "evidence-archive-30105552"
+    },
+    {
+      "id": 15072116551,
+      "tag": "evidence-archive-30144233"
+    },
+    {
+      "id": 15112357598,
+      "tag": "evidence-archive-30224715"
     }
   ],
   "billing_quota": "unknown: account billing permission required",
-  "archive_candidates": 2,
+  "archive_candidates": 3,
   "archive_pending": 0,
   "workflow_states": {
     ".github/workflows/causal_discovery.yml": "active",
@@ -127,6 +141,6 @@
     "checkpoint_uncompressed_bytes": 603979776
   },
   "large_files": [],
-  "default_branch_commit_age_days": 0,
-  "status": "ok"
+  "default_branch_commit_age_days": 1,
+  "status": "attention"
 }
