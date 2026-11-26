@@ -11,12 +11,11 @@ import os
 import random
 import time
 from functools import lru_cache
-from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
 
-from . import coverage, data, events, foundry, indicator_bank as bank, research, surface
+from . import combination_debt, coverage, data, events, foundry, indicator_bank as bank, research, surface
 
 VERSION = "coverage-combinations-v1"
 BANK = tuple("bank:"+n for n in bank.FAMILIES)
@@ -37,15 +36,14 @@ EVENT_SCHEDULE = ("mixed_pair","event_single","event_pair","mixed_small","mixed_
                   "event_higher","event_single","mixed_higher","event_settings")
 SETTINGS = ("technical_settings","event_settings")
 MIN_BARS = 120
-MAX_PENDING = 64
 MIN_EVENTS = 3
 POLICY = {**foundry.POLICY,"version":VERSION,"registry":"bank_and_legacy_rule_types",
           "catalog":"every_unordered_family_subset_size; boolean_modes; event_only_avoid; directions",
           "settings":"separate_seeded_parameter_variations_not_exhaustive",
-          "min_bars":MIN_BARS,"min_events_per_fold":MIN_EVENTS,"max_pending_per_lane":MAX_PENDING,
+          "min_bars":MIN_BARS,"min_events_per_fold":MIN_EVENTS,
           "event_clock":"first_completed_bar_strictly_after_release_then_next_open",
           "event_cutoff":"earliest_available_source_snapshot",
-          "pending":"bounded_retry_no_silent_skip","matched_unfiltered_control":True}
+          "pending":"sparse_chunk_bitmap_fixed_retry_sweeps_no_lane_cap","matched_unfiltered_control":True}
 SCHEMA = """CREATE TABLE IF NOT EXISTS combination_cursor(
  asset TEXT NOT NULL,frame TEXT NOT NULL,lane TEXT NOT NULL,version TEXT NOT NULL,
  next_rank TEXT NOT NULL,PRIMARY KEY(asset,frame,lane,version))"""
@@ -453,30 +451,30 @@ def run_lane(db,asset,market,current,frame,lane,dates,cutoffs,token):
     args=(asset,frame,lane,VERSION)
     p=cursor(db,asset,frame,lane)
     limit=total(frame,lane)
-    pending_count=db.execute("SELECT count(*) FROM combination_pending WHERE asset=? AND frame=? AND lane=? AND version=?",args).fetchone()[0]
-    retry=db.execute("""SELECT rank FROM combination_pending WHERE asset=? AND frame=? AND lane=? AND version=?
-                       AND token<>? ORDER BY checked,rank LIMIT 1""",(*args,token)).fetchone()
+    combination_debt.initialize(db)
+    combination_debt.migrate_lane(db,args)
+    retry=combination_debt.pick_retry(db,args,p,token)
     def inspect(rank,is_retry):
         spec=plan(asset,frame,lane,rank)
         status,identity=evaluate(db,asset,market,current,spec,lane,dates,cutoffs)
         if status.startswith("blocked_"):
-            db.execute("INSERT OR REPLACE INTO combination_pending VALUES (?,?,?,?,?,?,?,?)",
-                       (*args,str(rank),status,token,datetime.now(UTC).isoformat()))
+            combination_debt.set_reason(db,args,rank,status)
         elif is_retry:
-            db.execute("DELETE FROM combination_pending WHERE asset=? AND frame=? AND lane=? AND version=? AND rank=?",(*args,str(rank)))
+            combination_debt.set_reason(db,args,rank,None)
         if not is_retry:
             set_cursor(db,asset,frame,lane,p+1)
         return {"status":status,"rank":str(rank),"id":identity,
                 "indicators":[r["family"] for r in spec["rules"]],"events":[e["name"] for e in spec["events"]]}
     attempted=None
-    if retry:
-        attempted=inspect(int(retry[0]),True)
+    if retry is not None:
+        attempted=inspect(retry,True)
         if not attempted["status"].startswith("blocked_"):
             return attempted
     if limit is not None and p>=limit:
-        return {"status":"waiting_blocked" if pending_count else "catalog_complete","retry":attempted}
-    if pending_count>=MAX_PENDING:
-        return {"status":"blocked_pending_capacity","pending":pending_count,"retry":attempted}
+        pending=combination_debt.count(db,args)
+        return {"status":"waiting_blocked" if pending else "catalog_complete","pending":pending,"retry":attempted}
+    # A full retry backlog cannot prevent new designs. Each attempted-but-
+    # blocked rank remains losslessly stored as one bit until it is evaluated.
     result=inspect(p,False)
     if attempted: result["retry"]=attempted
     return result
@@ -521,9 +519,7 @@ def summary(db):
     if not exists: return []
     registered={f:sum(total(f,l) for l in LANES if l not in SETTINGS) for f in FRAMES}
     core={f:sum(total(f,l) for l in CORE_LANES) for f in FRAMES}
-    pending={}
-    for a,f,l,n in db.execute("SELECT asset,frame,lane,count(*) FROM combination_pending WHERE version=? GROUP BY asset,frame,lane",(VERSION,)):
-        pending[a,f,l]=n
+    pending=combination_debt.counts(db,VERSION)
     result={}
     for a,f,l,p in db.execute("SELECT asset,frame,lane,next_rank FROM combination_cursor WHERE version=?",(VERSION,)):
         item=result.setdefault((a,f),{"asset":a,"frame":f,"covered_templates":0,"blocked":0,
@@ -544,8 +540,10 @@ def summary(db):
         count=registered[f]
         covered=item["covered_templates"]
         item.update(registered_templates=str(count),covered_templates=str(covered),
-                    not_covered=str(count-covered),core_registered=core[f],
-                    core_not_covered=core[f]-item["core_covered"])
+                    not_covered=str(count-covered),unvisited_templates=str(count-covered-item["blocked"]),
+                    core_registered=core[f],core_not_covered=core[f]-item["core_covered"],
+                    core_unvisited=core[f]-item["core_covered"]-item["core_blocked"],
+                    coverage_complete=covered==count)
     return sorted(result.values(),key=lambda r:(r["asset"],r["frame"]))
 
 def external_scope():

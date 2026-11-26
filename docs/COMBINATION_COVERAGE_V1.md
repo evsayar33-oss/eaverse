@@ -42,9 +42,14 @@ mevcut yürütme süresi sınırı uygulanır.
 Eksik geçmiş/kaynak, tanımsız ölçüm veya yetersiz bağımsız olay sayısı
 tamamlanmış deneme değildir. Engellenen rank saklanır ve değişen veriyle
 yeniden incelenir; başarısız tekrar diğer yeni tasarımları aç bırakmaz.
-Bekleyen kayıtlar varlık/zaman dilimi/kuyruk başına 64 ile sınırlıdır.
-Kapasiteye ulaşan ilgili kuyruk sırası atlanmaz; açık borç olarak kalır.
-Diğer kuyruklar devam eder. Tamamlanan tasarım ve gerçek tekil backtest
+Bekleyen ranklar nedenlerine göre 1.024 bitlik parçalar halinde kayıpsız
+sıkıştırılır; önceki 64 kayıt sınırı kaldırılmıştır. Eski kayıtlar doğrulanarak
+taşınır. Her veri değişiminde başlangıçta sabitlenmiş sıra sonuna kadar ayrı
+yeniden kontrol turu yürür; yeni sıranın ilerlemesi eski borcu aç bırakmaz.
+Bir engellenen tekrar sonrası yeni tasarım denenebilir. Her varlıkta henüz
+ziyaret edilmemiş ve veri/örneklem bekleyen ranklar ayrı raporlanır.
+Yürütme bütçesi korunur; çok büyük teorik alan belleğe veya veritabanına
+baştan yazılmaz. Tamamlanan tasarım ve gerçek tekil backtest
 sayısı ayrıdır; tekrar kimliği yeniden sayılmaz. Eski arşivler korunur.
 
 ## Yürütme ve kanıt

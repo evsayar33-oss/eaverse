@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from eaverse import combination_research as cr, data, engine, events, research
+from eaverse import combination_debt as debt, combination_research as cr, data, engine, events, research
 from test_research import market_frame
 
 
@@ -113,7 +113,7 @@ class CombinationTests(unittest.TestCase):
             r=cr.run_lane(db,"asset",data.MARKETS[0],bars,"1d","event_single",{}, {},"a")
             self.assertEqual(r["status"],"blocked_event_data")
             self.assertEqual(db.execute("SELECT count(*) FROM attempts").fetchone()[0],0)
-            self.assertEqual(db.execute("SELECT count(*) FROM combination_pending").fetchone()[0],1)
+            self.assertEqual(debt.count(db,("asset","1d","event_single",cr.VERSION)),1)
             # Missing data cannot starve the next rank; a failed old retry may
             # be followed by another new design.
             r=cr.run_lane(db,"asset",data.MARKETS[0],bars,"1d","event_single",{}, {},"b")
@@ -123,6 +123,55 @@ class CombinationTests(unittest.TestCase):
             r=cr.run_lane(db,"asset",data.MARKETS[0],bars,"1d","event_single",days,cuts,"c")
             self.assertEqual(r["rank"],str(position))
             self.assertEqual(r["status"],"evaluated")
+
+    def test_more_than_old_pending_cap_preserves_all_and_advances(self):
+        bars=market_frame(800)
+        args=("asset","1d","mixed_pair",cr.VERSION)
+        with engine.connect(":memory:") as db:
+            db.execute(cr.SCHEMA);db.execute(cr.PENDING)
+            def blocked(*_args,**_kwargs): return "blocked_event_data","id"
+            with patch.object(cr,"evaluate",side_effect=blocked):
+                for i in range(90):
+                    r=cr.run_lane(db,"asset",data.MARKETS[0],bars,"1d","mixed_pair",{}, {},str(i))
+                    self.assertEqual(r["status"],"blocked_event_data")
+                self.assertEqual(cr.cursor(db,"asset","1d","mixed_pair"),90)
+                self.assertEqual(debt.count(db,args),90)
+                self.assertEqual(db.execute("SELECT count(*) FROM combination_debt_bits").fetchone()[0],1)
+                record=cr.summary(db)[0]
+                self.assertEqual(record["blocked"],90)
+                self.assertEqual(record["covered_templates"],"0")
+                self.assertEqual(int(record["unvisited_templates"])+90,int(record["registered_templates"]))
+            # Resume a recovered rank without recreating the full grid.
+            with patch.object(cr,"evaluate",return_value=("evaluated","recovered")):
+                r=cr.run_lane(db,"asset",data.MARKETS[0],bars,"1d","mixed_pair",{}, {},"recovered")
+                self.assertEqual(r["status"],"evaluated")
+                self.assertEqual(debt.count(db,args),89)
+
+    def test_migration_and_retry_sweep_keep_exact_large_ranks(self):
+        args=("asset","1d","mixed_higher",cr.VERSION)
+        with engine.connect(":memory:") as db:
+            db.execute(cr.SCHEMA);db.execute(cr.PENDING);debt.initialize(db)
+            values=[0,1023,1024,99999,10**25]
+            for i,r in enumerate(values):
+                db.execute("INSERT INTO combination_pending VALUES (?,?,?,?,?,?,?,?)",
+                           (*args,str(r),"blocked_history","old","2025-01-01"))
+            self.assertEqual(debt.counts(db,cr.VERSION)[args[:3]],5)
+            debt.migrate_lane(db,args)
+            self.assertEqual(db.execute("SELECT count(*) FROM combination_pending").fetchone()[0],0)
+            self.assertEqual(debt.count(db,args),5)
+            high=10**25+1
+            # New ranks arrive while the same sweep is active. They cannot
+            # move the fixed boundary and displace the older ranks.
+            seen=[]
+            for i in range(5):
+                seen.append(debt.pick_retry(db,args,high+i,"token"+str(i)))
+                debt.set_reason(db,args,high+i,"blocked_event_data")
+            self.assertEqual(seen,values)
+            self.assertEqual(debt.pick_retry(db,args,high+5,"latest"),0)
+            debt.set_reason(db,args,1024,"blocked_undefined_indicator")
+            self.assertEqual(debt.count(db,args),10)
+            debt.set_reason(db,args,1024,None)
+            self.assertEqual(debt.count(db,args),9)
 
     def test_event_budget_and_deadline_do_not_fake_tests(self):
         bars=market_frame(800)
