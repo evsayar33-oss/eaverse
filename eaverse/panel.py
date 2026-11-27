@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import archive, checkpoint, combination_focus, combination_research, coverage, foundry, indicator_research, research as research_engine
+from . import archive, checkpoint, combination_focus, combination_research, coverage, foundry, indicator_research, paper_admission, research as research_engine
 from .delivery import gh
 
 
@@ -61,6 +61,7 @@ def projection(db_path, report, run_url):
         }
         research["markets"] = report.get("markets",{})
         research["history_summary"] = report.get("history_summary",{})
+        research["paper_admission"] = report.get("paper_admission") or paper_admission.summary(db)
         research["archived_outcomes"] = archive.outcome_counts(db)
         research["combination_focus"] = combination_focus.dashboard(db)
         research["combination_focus_slice"] = report.get("combination_focus_slice",{})
@@ -93,8 +94,8 @@ def projection(db_path, report, run_url):
                 "spec": json.loads(row["spec"]), "policy": json.loads(row["policy"]),
                 "origin": json.loads(row["origin"]), "progress": json.loads(row["metrics"]) if row["metrics"] else None,
                 "result": json.loads(row["result"]) if row["result"] else None,
-                "data_paused": row["status"] == "active" and bool(error),
-                "data_error": error if row["status"] == "active" else None,
+                "data_paused": row["status"] == "paused_integrity" or (row["status"] == "active" and bool(error)),
+                "data_error": (json.loads(row["result"] or "{}").get("error") or json.loads(row["result"] or "{}").get("reason")) if row["status"]=="paused_integrity" else error if row["status"] == "active" else None,
             })
             longer = db.execute("SELECT result FROM extended_checks WHERE sequence=?", (row["sequence"],)).fetchone()
             entry["extended"] = json.loads(longer[0]) if longer else None
