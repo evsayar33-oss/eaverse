@@ -202,7 +202,7 @@ class NativePaperTests(unittest.TestCase):
         bars=frame(); now=now_for(bars); asset="CRYPTO:BTC-USD"
         with tempfile.TemporaryDirectory() as work:
             path=Path(work)/"state.sqlite"
-            with engine.connect(path) as db:
+            with engine.connect(path) as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
                 seed(db,coverage.VERSION,COVERAGE,asset,bars)
                 native.harvest(db)
                 native.run(db,{asset:bars},{asset:M},{},{},now)
