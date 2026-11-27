@@ -9,7 +9,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from . import data, paper_archive, reference, research, universe
 
@@ -246,6 +246,7 @@ def admit(db, asset, market, bars, now):
         status="invalid_evidence" if v["execution_audit"]["status"]=="mismatch" else "audit_pending"
         mark(db,row,status,v["execution_audit"]["status"],now)
         return {"status":status,"id":row["id"]}
+    now=max(now,datetime.now(UTC)) if os.getenv("GITHUB_ACTIONS")=="true" else now
     start=(now.date()+timedelta(days=1)).isoformat()
     if market.calendar:
         import exchange_calendars as xcals

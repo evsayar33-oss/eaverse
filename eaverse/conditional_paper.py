@@ -16,7 +16,7 @@ import re
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from functools import lru_cache
 
@@ -526,15 +526,18 @@ def admit(db,row,bars,market,dates,cutoffs,now):
         update(db,row,"recheck_rejected",q["reason"],now,q)
         return "recheck_rejected"
     through=str(current.index[-1].date())
-    state={"version":VERSION,"adapter_sha256":adapter_hash(),"registered_utc":now.isoformat(),
-           "registered_date":now.date().isoformat(),"frame":spec["frame"],"direction":spec["direction"],
+    # A long backlog cycle can cross UTC midnight. Use actual admission time,
+    # not the cycle's initial time, so an elapsed opening is never backfilled.
+    registered=max(now,datetime.now(UTC)) if os.getenv("GITHUB_ACTIONS")=="true" else now
+    state={"version":VERSION,"adapter_sha256":adapter_hash(),"registered_utc":registered.isoformat(),
+           "registered_date":registered.date().isoformat(),"frame":spec["frame"],"direction":spec["direction"],
            "data_start":str(bars.index[0].date()),"data_through":str(bars.index[-1].date()),
            "data_sha256":data.fingerprint(bars),"event_through":through,
            "event_sha256":complete_event_hash(names,dates,through),"source":market.source,
            "cost_bps":market.cost_bps,"observed_bars":0,"target_bars":FORWARD_BARS,
            "short_borrow_assumed":spec["direction"]!="long","conditional_only":True,"risk_policy":recovery_risk.VERSION,
            "paper_approved":False,"live_allowed":False}
-    update(db,row,ACTIVE,None,now,q,state)
+    update(db,row,ACTIVE,None,registered,q,state)
     return ACTIVE
 
 
