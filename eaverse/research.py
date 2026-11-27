@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 import numpy as np
 import pandas as pd
 
-from . import metrics
+from . import metrics, recovery_risk
 
 
 VERSION = "1"
@@ -41,8 +41,7 @@ MIN_VALIDATION_BARS = 180
 PAPER_BARS = 90
 PAPER_TRADES = 8
 PAPER_EXECUTION_DELAY = 2
-DRAWDOWN_LIMIT = 0.25
-POLICY = {
+LEGACY_POLICY = {
     "history_version": VERSION,
     "history_folds": 3,
     "history_fold_min_bars": 60,
@@ -53,10 +52,15 @@ POLICY = {
     "paper_bars": PAPER_BARS,
     "paper_execution_delay_bars": PAPER_EXECUTION_DELAY,
     "paper_min_round_trips": PAPER_TRADES,
-    "paper_max_drawdown": DRAWDOWN_LIMIT,
+    "paper_max_drawdown": 0.25,
     "paper_family_alpha": 0.05,
     "paper_hac_lags": [5, 10],
 }
+# Existing PAPER experiments retain their originally frozen contract.
+# New research/admissions no longer use a percentage drawdown threshold.
+POLICY = {k:v for k,v in LEGACY_POLICY.items() if k!="paper_max_drawdown"}
+POLICY.update({"paper_risk_policy":recovery_risk.VERSION,
+               "paper_max_recovery_days":recovery_risk.MAX_RECOVERY_DAYS})
 
 
 def canonical(value) -> str:
@@ -331,10 +335,16 @@ def history_metrics(bars, desired, index, cost_bps, periods=None):
     positive = sum(result["net"] > 0 for result in results)
     trades = sum(result["trades"] for result in results)
     drawdown = max(result["drawdown"] for result in results)
+    continuous,_,_=simulation(bars,desired,index[0],index[-1],2*cost_bps,delay=2)
+    continuous_dates=bars.loc[index[0]:index[-1]].index[1:]
+    risk=recovery_risk.measure(continuous.to_numpy(),continuous_dates,index[0])
+    reason=recovery_risk.reason(risk)
+    if any(result["net"]<=-1 or result["drawdown"]>=1 for result in results):
+        reason="capital_ruin"
     report = {
         "net": total_net, "profitable_folds": positive, "trades": trades, "drawdown": drawdown,
-        "pass": total_net > 0 and positive >= 2 and trades >= 6 and drawdown <= DRAWDOWN_LIMIT,
-        "folds": results,
+        "pass": total_net > 0 and positive >= 2 and trades >= 6 and reason is None,
+        "folds": results,"risk_policy":recovery_risk.VERSION, "risk_reason":reason, **risk,
     }
     if periods is not None:
         report.update({
@@ -357,7 +367,7 @@ def hac_p_value(excess, lag):
     return 0.5 * math.erfc(z / math.sqrt(2))
 
 
-def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True, periods=365):
+def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True, periods=365, frozen_policy=None):
     returns, trades, _ = simulation(bars, desired, start, stop, 2 * cost_bps, delay=PAPER_EXECUTION_DELAY)
     benchmark, _, _ = simulation(bars, pd.Series(1.0, index=bars.index), start, stop, 2 * cost_bps)
     measurements = stats(returns, trades)
@@ -366,6 +376,12 @@ def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True,
     ))
     benchmark_net = stats(benchmark, 0)["net"]
     measurements["benchmark_net"] = benchmark_net
+    risk=recovery_risk.measure(returns.to_numpy(),bars.loc[start:stop].index[1:],start)
+    measurements.update(risk)
+    selected=POLICY if frozen_policy is None else frozen_policy
+    measurements["risk_policy"]=selected.get("paper_risk_policy","legacy_frozen")
+    reason=recovery_risk.reason(risk)
+    measurements["risk_reason"]=reason
     if not final:
         return measurements, returns, benchmark
     # Test outperformance against both buy-and-hold and cash. Use the most
@@ -377,6 +393,7 @@ def paper_metrics(bars, desired, start, stop, cost_bps, sequence, *, final=True,
     measurements.update({"benchmark_net": benchmark_net, "p_value": p_value, "alpha": alpha})
     measurements["pass"] = (
         measurements["net"] > max(0, benchmark_net) and trades >= PAPER_TRADES
-        and measurements["drawdown"] <= DRAWDOWN_LIMIT and p_value <= alpha
+        and (measurements["drawdown"]<=selected["paper_max_drawdown"]
+             if "paper_max_drawdown" in selected else reason is None) and p_value <= alpha
     )
     return measurements, returns, benchmark

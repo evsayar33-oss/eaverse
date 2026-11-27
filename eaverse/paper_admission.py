@@ -7,8 +7,9 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from . import data, paper_archive, reference, research, universe
 
@@ -21,6 +22,8 @@ CREATE TABLE IF NOT EXISTS paper_candidates (
     PRIMARY KEY(asset,version,id)
 );
 CREATE TABLE IF NOT EXISTS paper_candidate_archive_checked(sha TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS paper_candidate_archive_policy_checked(sha TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS paper_candidate_archive_attempts(sha TEXT PRIMARY KEY,checked TEXT NOT NULL,error TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS paper_candidates_status ON paper_candidates(status,asset,nominated_asof);
 """
 
@@ -38,10 +41,18 @@ def previous_identities(db):
 
 
 def register(db,row,existing):
-    if not row["spec"] or not row["validated"] or not row["policy"] or row["version"]!=research.VERSION:
+    if not row["spec"] or not row["policy"] or row["version"]!=research.VERSION:
         return 0
-    d,v=json.loads(row["discovered"]),json.loads(row["validated"])
-    if d.get("pass") is not True or v.get("pass") is not True:
+    d,v=json.loads(row["discovered"]),json.loads(row["validated"] or "{}")
+    old=row["policy"]==research.canonical(research.LEGACY_POLICY)
+    def only_old_limit(m):
+        return (old and m.get("pass") is False and m.get("net",0)>0
+                and m.get("trades",0)>=6 and m.get("profitable_folds",0)>=2
+                and .25<m.get("drawdown",0)<1)
+    rescue=only_old_limit(d) or only_old_limit(v)
+    if not ((d.get("pass") is True and v.get("pass") is True)
+            or (rescue and (d.get("pass") is True or only_old_limit(d))
+                and (not v or v.get("pass") is True or only_old_limit(v)))):
         return 0
     status,reason="waiting",None
     if (row["asset"],row["version"],row["id"]) in existing:
@@ -50,15 +61,15 @@ def register(db,row,existing):
         status,reason="research_only","source_not_forward_qualified"
     elif (d.get("superlab_receipt") or {}).get("status")=="INVALID_EVIDENCE":
         status,reason="invalid_evidence","central_contract_rejected"
-    elif row["policy"]!=research.canonical(research.POLICY):
+    elif row["policy"] not in (research.canonical(research.POLICY),research.canonical(research.LEGACY_POLICY)):
         status,reason="research_only","incompatible_frozen_policy"
     elif v.get("execution_audit",{}).get("status")=="mismatch":
         status,reason="invalid_evidence","execution_audit_mismatch"
-    elif v.get("execution_audit",{}).get("status")!="matched":
+    elif v.get("execution_audit",{}).get("status")!="matched" and not rescue:
         status,reason="audit_pending",v.get("execution_audit",{}).get("status","missing_execution_audit")
     inserted=db.execute("INSERT OR IGNORE INTO paper_candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)",
         (row["asset"],row["version"],row["id"],row["source"],row["spec"],row["asof"],
-         row["discovered"],row["validated"],research.canonical(dict(row)),status,reason))
+         row["discovered"],row["validated"] or "{}",research.canonical(dict(row)),status,reason))
     return inserted.rowcount
 
 
@@ -66,7 +77,7 @@ def seed(db):
     """Recover intact positive historical nominations and preserve all new ones."""
     existing=previous_identities(db)
     return sum(register(db,row,existing) for row in db.execute("""SELECT * FROM attempts
-        WHERE version=? AND validated IS NOT NULL AND spec<>'' AND policy<>'' AND NOT EXISTS
+        WHERE version=? AND spec<>'' AND policy<>'' AND NOT EXISTS
         (SELECT 1 FROM paper_candidates c WHERE c.asset=attempts.asset AND c.version=attempts.version AND c.id=attempts.id)
         ORDER BY asof,asset,id""",(research.VERSION,)))
 
@@ -81,16 +92,19 @@ def restore_archive(db,path,sha,expected):
     seen=set()
     added=total_bytes=0
     with gzip.open(path,"rt",encoding="utf-8") as stream:
-        for line in stream:
-            total_bytes+=len(line.encode())
-            if total_bytes>64*1024*1024:
+        while line:=stream.readline(8*1024*1024+1):
+            row_bytes=len(line.encode())
+            if row_bytes>8*1024*1024:
+                raise ValueError("candidate archive record too large")
+            total_bytes+=row_bytes
+            if total_bytes>768*1024*1024:
                 raise ValueError("candidate archive decompression cap")
             item=json.loads(line);row=item["row"];kind=item["type"]
             key=(kind,row["version"],row["asset"],row["id"])
             if kind not in ("technical","event") or key in seen or len(seen)>=expected:
                 raise ValueError("invalid candidate archive record")
             seen.add(key)
-            if kind!="technical" or row["version"]!=research.VERSION or not row.get("validated"):
+            if kind!="technical" or row["version"]!=research.VERSION:
                 continue
             prior=db.execute("SELECT * FROM attempts WHERE version=? AND asset=? AND id=?",
                              (row["version"],row["asset"],row["id"])).fetchone()
@@ -102,20 +116,28 @@ def restore_archive(db,path,sha,expected):
             added+=register(db,row,existing)
     if len(seen)!=expected:
         raise ValueError("candidate archive record count mismatch")
-    db.execute("INSERT INTO paper_candidate_archive_checked VALUES (?)",(sha,))
+    db.execute("INSERT OR IGNORE INTO paper_candidate_archive_checked VALUES (?)",(sha,))
+    db.execute("INSERT OR IGNORE INTO paper_candidate_archive_policy_checked VALUES (?)",(sha,))
     return added
 
 
-def recover_one_archive(db):
+def recover_one_archive(db,now=None):
     """Bounded recovery of old successful nominations that were compacted."""
+    from datetime import UTC, datetime
+    now=now or datetime.now(UTC)
     row=db.execute("""SELECT h.sha,h.url,h.records,max(a.asof) AS most_recent
         FROM attempts a JOIN history_archives h ON h.sha=json_extract(a.discovered,'$.archive')
-        WHERE a.version=? AND a.policy='' AND json_extract(a.discovered,'$.pass')=1
-          AND json_extract(a.discovered,'$.outcome')='screened_not_final'
-          AND json_extract(a.discovered,'$.validation_metrics.net')>0
-          AND NOT EXISTS (SELECT 1 FROM paper_candidate_archive_checked c WHERE c.sha=h.sha)
+        WHERE a.version=? AND a.policy='' AND (
+          (json_extract(a.discovered,'$.pass')=1 AND json_extract(a.discovered,'$.outcome')='screened_not_final'
+           AND json_extract(a.discovered,'$.validation_metrics.net')>0)
+          OR (json_extract(a.discovered,'$.outcome') IN ('discovery_gate_failed','validation_gate_failed') AND
+              json_extract(a.discovered,'$.discovery_metrics.net')>0 AND
+              (json_extract(a.discovered,'$.discovery_metrics.drawdown')>.25 OR
+               json_extract(a.discovered,'$.validation_metrics.drawdown')>.25)))
+          AND NOT EXISTS (SELECT 1 FROM paper_candidate_archive_policy_checked c WHERE c.sha=h.sha)
+          AND NOT EXISTS (SELECT 1 FROM paper_candidate_archive_attempts c WHERE c.sha=h.sha AND substr(c.checked,1,10)=?)
           AND NOT EXISTS (SELECT 1 FROM paper_candidates p WHERE p.asset=a.asset AND p.version=a.version AND p.id=a.id)
-        GROUP BY h.sha,h.url,h.records ORDER BY most_recent DESC,h.sha LIMIT 1""",(research.VERSION,)).fetchone()
+        GROUP BY h.sha,h.url,h.records ORDER BY most_recent DESC,h.sha LIMIT 1""",(research.VERSION,now.date().isoformat())).fetchone()
     if not row:
         return {"status":"complete","added":0}
     repo=os.environ["GITHUB_REPOSITORY"]
@@ -126,10 +148,31 @@ def recover_one_archive(db):
     if not match or not re.fullmatch(r"[0-9a-f]{64}",sha):
         raise ValueError("unsupported candidate archive origin")
     from .delivery import gh
-    with tempfile.TemporaryDirectory() as tmp:
-        gh("release","download",match[1],"-R",repo,"--pattern",name,"--dir",tmp)
-        added=restore_archive(db,Path(tmp)/name,sha,row["records"])
-    return {"status":"recovered","added":added,"sha":sha}
+    db.execute("SAVEPOINT legacy_risk_archive")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            gh("release","download",match[1],"-R",repo,"--pattern",name,"--dir",tmp)
+            added=restore_archive(db,Path(tmp)/name,sha,row["records"])
+        result={"status":"recovered","added":added,"sha":sha}
+    except Exception as exc:
+        db.execute("ROLLBACK TO legacy_risk_archive")
+        error=str(exc)[:220]
+        db.execute("INSERT OR REPLACE INTO paper_candidate_archive_attempts VALUES (?,?,?)",(sha,now.isoformat(),error))
+        result={"status":"pending","added":0,"sha":sha,"reason":error}
+    finally:
+        db.execute("RELEASE legacy_risk_archive")
+    return result
+
+
+def recover_archives(db,now,seconds=120):
+    deadline=time.monotonic()+seconds
+    results=[]
+    while time.monotonic()<deadline:
+        result=recover_one_archive(db,now)
+        if result["status"]=="complete":
+            break
+        results.append(result)
+    return {"status":"complete" if not results else "processed","added":sum(x["added"] for x in results),"archives":results}
 
 
 def priority_assets(db, market, today):
@@ -203,6 +246,7 @@ def admit(db, asset, market, bars, now):
         status="invalid_evidence" if v["execution_audit"]["status"]=="mismatch" else "audit_pending"
         mark(db,row,status,v["execution_audit"]["status"],now)
         return {"status":status,"id":row["id"]}
+    now=max(now,datetime.now(UTC)) if os.getenv("GITHUB_ACTIONS")=="true" else now
     start=(now.date()+timedelta(days=1)).isoformat()
     if market.calendar:
         import exchange_calendars as xcals

@@ -219,7 +219,7 @@ def desired(bars,spec):
     return value*spec["size"]
 
 
-def execute(bars, targets, start, stop, risk, cost_bps):
+def execute(bars, targets, start, stop, risk, cost_bps, *, return_full_path=False):
     """Cash + signed units; next open signal; gap stops, prior-bar trail.
     Ambiguous simultaneous stop/target uses stop first. TP never gets favorable
     gap improvement. No intrabar re-entry, leverage or assumed orderbook fills.
@@ -261,6 +261,10 @@ def execute(bars, targets, start, stop, risk, cost_bps):
             locked = 0
         previous_signal = want
         a = atr[i]
+        # The recovery adapter audits insolvency at the executable open before
+        # any order can conceal a gap loss. Historical v1 replay stays unchanged.
+        if return_full_path and cash+units*o[i]<=0:
+            path.append(-1.); dd=1.; break
         # Existing gap risk takes priority over a newly observed signal.
         if units and np.isfinite(a) and a>0:
             sign = np.sign(units)
@@ -277,6 +281,8 @@ def execute(bars, targets, start, stop, risk, cost_bps):
         if i<stop-1 and not units and want and not locked and np.isfinite(a) and a>0:
             equity = cash
             if equity<=0:
+                if return_full_path:
+                    path.append(-1.); dd=1.
                 break
             size = abs(target[i])*(.5 if risk["staged"] else 1.)
             order(want*equity*size/(o[i]*(1+fee)),o[i])
@@ -300,6 +306,8 @@ def execute(bars, targets, start, stop, risk, cost_bps):
                 close(min(o[i],sl) if sign>0 else max(o[i],sl)); locked=want
             elif units<0 and cash+units*h[i]<=0:
                 path.append(-1.); dd=1.; break
+            elif return_full_path and cash+units*adverse-(abs(units)*o[i]*.05*max(1,(bars.index[i]-bars.index[i-1]).days)/365 if units<0 and i>0 else 0)<=0:
+                path.append(-1.); dd=1.; break
             elif tp is not None and sign*(favorable-tp)>=0:
                 if risk["partial"]:
                     order(-units/2,tp); took_profit=True; partials+=1
@@ -322,12 +330,13 @@ def execute(bars, targets, start, stop, risk, cost_bps):
     if not path:
         raise ValueError("EMPTY_RISK_PATH")
     # Compound to weekly paths to cap archive size; daily drawdown remains source-only.
-    weeks=bars.index[start:start+len(path)].to_period("W-SUN")
-    grouped=pd.Series(path,index=weeks).groupby(level=0).apply(lambda x:float(np.prod(1+x)-1))
+    if not return_full_path:
+        weeks=bars.index[start:start+len(path)].to_period("W-SUN")
+        grouped=pd.Series(path,index=weeks).groupby(level=0).apply(lambda x:float(np.prod(1+x)-1))
     net=float(np.prod(1+np.asarray(path))-1)
     metrics={"net":net,"drawdown":dd,"entries":entries,"exits":exits,"partial_exits":partials,"scale_ins":adds,
              "status":"ruin" if net<=-1 else "evaluated" if entries else "no_entries"}
-    return metrics,grouped.tolist()
+    return metrics,(path if return_full_path else grouped.tolist())
 
 
 def run_asset(db,asset,market,bars,deadline=None):

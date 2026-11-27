@@ -56,6 +56,17 @@ class PaperAdmissionTests(unittest.TestCase):
             self.assertIsNone(admission.admit(db,"CRYPTO:BTC-USD",CRYPTO,bars,NOW))
             self.assertEqual(db.execute("SELECT count(*) FROM paper WHERE status='active'").fetchone()[0],13)
 
+    def test_old_percentage_only_rejected_discovery_is_eligible_for_fresh_recheck(self):
+        with engine.connect(":memory:") as db:
+            ident=self.seed_attempt(db,"CRYPTO:BTC-USD")
+            d={"pass":False,"net":.3,"drawdown":.55,"trades":12,"profitable_folds":2}
+            db.execute("UPDATE attempts SET policy=?,discovered=?,validated=NULL WHERE id=?",
+                (research.canonical(research.LEGACY_POLICY),research.canonical(d),ident))
+            self.assertEqual(admission.seed(db),1)
+            row=db.execute("SELECT status,validation FROM paper_candidates").fetchone()
+            self.assertEqual(row["status"],"waiting")
+            self.assertEqual(row["validation"],"{}")
+
     def test_full_market_capacity_retains_waiting_row(self):
         with engine.connect(":memory:") as db:
             for i in range(admission.CAPACITY["CRYPTO"]):

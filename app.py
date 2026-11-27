@@ -211,7 +211,9 @@ def render_panel(payload):
             cols[1].metric("Koşullu PAPER aktif",nc.get("conditional_active",0))
             cols[2].metric("Tarihsel elemede / yeniden kontrolde kaldı",
                            nc.get("screen_rejected",0)+nc.get("recheck_rejected",0))
-            cols[3].metric("Kapasite bekleyen onaylı aday",nc.get("qualified_waiting_capacity",0))
+            cols[3].metric("En çok toparlanma (gün)",native.get("max_recovery_days",180))
+            if native.get("risk_policy"):
+                st.caption("Sabit maksimum düşüş sınırı yok. Kasa sıfırlanması veya uzun toparlanma elenir. Koşullu izleme için aday/varlık/piyasa kotası yok.")
             st.caption("Bu izleme gerçek emir veya kesin PAPER/ACCEPT onayı değildir. "
                        "Her stratejinin özgün motoru ve maliyetleri korunur. 90 gelecekte oluşan strateji barı; "
                        "haftalık strateji için 90 tamamlanmış hafta. Short işlemleri varsayımsal ödünç maliyetlidir.")
@@ -223,10 +225,14 @@ def render_panel(payload):
                 table["historical_net_pct"]=pd.to_numeric(table["historical_net"],errors="coerce")*100
                 table["forward_net_pct"]=pd.to_numeric(table["forward_net"],errors="coerce")*100
                 columns=["asset","engine","frame","direction","status","historical_net_pct","registered",
-                         "observed_bars","target_bars","forward_net_pct","provisional","reason"]
+                         "observed_bars","target_bars","forward_net_pct","historical_recovery_days","forward_recovery_days","provisional","reason"]
+                for col in columns:
+                    if col not in table.columns:
+                        table[col]=None
                 st.dataframe(table[columns].rename(columns={"asset":"Varlık","engine":"Motor","frame":"Zaman dilimi",
                     "direction":"Yön","status":"Durum","historical_net_pct":"Tarihsel net %","registered":"Kayıt tarihi",
-                    "observed_bars":"İleri bar","target_bars":"Hedef bar","forward_net_pct":"Koşullu net %","provisional":"Geçici ölçüm","reason":"Neden"}),
+                    "observed_bars":"İleri bar","target_bars":"Hedef bar","forward_net_pct":"Koşullu net %",
+                    "historical_recovery_days":"Tarihsel toparlanma (gün)","forward_recovery_days":"İleri toparlanma (gün)","provisional":"Geçici ölçüm","reason":"Neden"}),
                     hide_index=True)
                 selected_native=st.selectbox("Koşullu strateji kanıtı",native["records"],format_func=lambda x:
                     f"{x['asset']} · {x['engine']} · {x['frame']} · {x['id'][:12]}")

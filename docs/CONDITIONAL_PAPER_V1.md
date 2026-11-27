@@ -1,4 +1,6 @@
-# Native conditional PAPER v1
+# Native conditional PAPER v1 (archived contract)
+
+**Superseded for new decisions by [v2](CONDITIONAL_PAPER_V2.md). Kept for reproducibility, not current eligibility.**
 Existing PAPER admission only supports its own executable strategy schema. Native research engines (coverage-1, coverage-2 / Foundry, coverage-combinations-v1 and coverage-indicators-v1) now have a separate durable research-only observation stage.
 
 * Every dual-positive historical hypothesis is identified by engine version, asset and immutable strategy ID. The original discovery and validation results are screened for positive net returns, no ruin, max 25% drawdown in each period, at least six entries combined and at least two per period. Terminal outcomes retain a reason. Missing evidence is not a failed backtest.
