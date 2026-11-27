@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, combination_focus, combination_research, coverage, data, events, foundry, history_sources, indicator_research, paper_archive, qualification, research, universe
+from . import cohort, combination_focus, combination_research, coverage, data, events, foundry, history_sources, indicator_research, model_research, paper_archive, qualification, reference, research, universe
 
 
 SCHEMA = """
@@ -150,9 +150,8 @@ def recheck_pending(db, asset, market, bars, now):
     # A historical revision must not manufacture a prospective observation.
     # Keep the original row and restart from a future opening, even if the
     # previously scheduled opening has already elapsed.
-    from .reference import audit_validation
-    revised["validation"]["execution_audit"] = audit_validation(bars.loc[:row["cutoff"]], weights,
-                                                                  row["cost"], revised["validation"])
+    revised["validation"]["execution_audit"] = reference.audit_validation(
+        bars.loc[:row["cutoff"]], weights, row["cost"], revised["validation"])
     accepted = all(block["pass"] for block in revised.values()) and revised["validation"]["execution_audit"]["status"] != "mismatch"
     evidence = {"reason": "origin_revision_before_first_observation", "revalidation": revised,
                 "checked_at": now.isoformat(), "replacement_eligible": accepted}
@@ -554,6 +553,15 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                             print(f"Indicator research error for {asset}: {exc}",flush=True)
                         finally:
                             db.execute("RELEASE indicator_research")
+                        db.execute("SAVEPOINT model_research")
+                        try:
+                            result["statistical_models"] = model_research.run_asset(db, asset, market, bars)
+                        except Exception as exc:
+                            db.execute("ROLLBACK TO model_research")
+                            result["statistical_models"] = {"status":"error","error":f"{type(exc).__name__}: {exc}"[:300]}
+                            print(f"Statistical model research error for {asset}: {exc}", flush=True)
+                        finally:
+                            db.execute("RELEASE model_research")
                         if time.monotonic() < general_deadline - 30:
                             db.execute("SAVEPOINT cohort_research")
                             try:
@@ -626,6 +634,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     report["new_indicator_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (indicator_research.VERSION, first_technical)).fetchone()[0]
     report["indicator_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (indicator_research.VERSION,)).fetchone()[0]
     report["indicator_counts"] = indicator_research.counts(db)
+    report["statistical_model_trials"] = db.execute(
+        "SELECT COUNT(*) FROM attempts WHERE version=?", (model_research.VERSION,)).fetchone()[0]
     report["new_foundry_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (foundry.VERSION, first_technical)).fetchone()[0]
     report["total_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version NOT LIKE 'coverage-%'").fetchone()[0]
     report["foundry_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (foundry.VERSION,)).fetchone()[0]
