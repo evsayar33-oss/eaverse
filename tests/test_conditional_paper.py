@@ -135,6 +135,35 @@ class NativePaperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"checksum"):
                 native.restore_archive(db,path,"0"*64,1,now_for(frame()))
 
+    def test_legacy_archive_above_64_mib_streams_and_retries_same_day(self):
+        now=now_for(frame())
+        with engine.connect(":memory:") as db,tempfile.TemporaryDirectory() as tmp:
+            seed(db,coverage.VERSION,COVERAGE)
+            row=dict(db.execute("SELECT * FROM attempts").fetchone())
+            path=Path(tmp)/"legacy.gz"
+            with gzip.open(path,"wt",encoding="utf-8",compresslevel=1) as out:
+                out.write(json.dumps({"type":"technical","row":row})+"\n")
+                for i in range(10):
+                    out.write(json.dumps({"type":"event","row":{"version":"old","asset":"US:X","id":str(i),
+                              "summary":"x"*(7*1024*1024)}})+"\n")
+            sha=hashlib.sha256(path.read_bytes()).hexdigest()
+            d,v,_,_=native.metrics_pair(row)
+            db.execute("UPDATE attempts SET spec='',policy='',validated=NULL,discovered=?",
+                       (research.canonical({"pass":False,"archive":sha,"discovery_metrics":d["metrics"],"validation_metrics":v["metrics"]}),))
+            native.harvest(db)
+            db.execute("INSERT INTO history_archives VALUES (?,?,?)",(sha,
+                       f"https://github.com/example/repo/releases/download/research-history-2026-11/research-{sha}.jsonl.gz",11))
+            db.execute("INSERT INTO native_paper_archive_attempts VALUES (?,?,?,?)",
+                       (sha,now.isoformat(),"pending","native archive expanded size cap"))
+            def download(*args):
+                import shutil
+                shutil.copyfile(path,Path(args[args.index("--dir")+1])/f"research-{sha}.jsonl.gz")
+            with patch.dict(os.environ,{"GITHUB_REPOSITORY":"example/repo"}),patch("eaverse.delivery.gh",side_effect=download):
+                result=native.recover_archives(db,now)
+            self.assertEqual(result[0]["status"],"recovered",result)
+            self.assertEqual(result[0]["added"],1)
+            self.assertEqual(native.summary(db)["counts"],{"queued":1})
+
     def test_revised_source_pauses_without_rewriting_frozen_progress(self):
         b=frame();now=now_for(b)
         with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
