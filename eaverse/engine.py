@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, combination_focus, combination_research, coverage, cross_asset_research, data, events, foundry, history_sources, indicator_research, model_research, paper_admission, paper_archive, qualification, reference, research, universe
+from . import cohort, combination_focus, combination_research, conditional_paper, coverage, cross_asset_research, data, events, foundry, history_sources, indicator_research, model_research, paper_admission, paper_archive, qualification, reference, research, universe
 
 
 SCHEMA = """
@@ -91,6 +91,7 @@ def connect(path):
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
     db.executescript(paper_admission.SCHEMA)
+    db.executescript(conditional_paper.SCHEMA)
     return db
 
 
@@ -374,6 +375,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     with db:
         update_pending_paper_policy(db, now)
         recovered_nominations=paper_admission.seed(db)
+        native_harvested=conditional_paper.harvest(db)
+        native_archive_recovery=[]
         archive_recovery={"status":"not_requested","added":0}
         if os.getenv("GITHUB_ACTIONS") == "true":
             db.execute("SAVEPOINT candidate_archive")
@@ -384,6 +387,14 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 archive_recovery={"status":"error","error":str(exc)[:200],"added":0}
             finally:
                 db.execute("RELEASE candidate_archive")
+            db.execute("SAVEPOINT native_archive")
+            try:
+                native_archive_recovery=conditional_paper.recover_archives(db,now)
+            except Exception as exc:
+                db.execute("ROLLBACK TO native_archive")
+                native_archive_recovery=[{"status":"error","error":str(exc)[:220]}]
+            finally:
+                db.execute("RELEASE native_archive")
         if os.getenv("GITHUB_ACTIONS") == "true":
             from . import ideas
             ideas.refresh(db)
@@ -408,14 +419,16 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             health(db, f"listings:{market.name}", "live listing catalog unavailable or stale" if stale_listing else None)
             selected = universe.queue(db, market, symbols, now.date(), asset_limit or universe.LIMITS[market.name])
             priority=paper_admission.priority_assets(db,market.name,now.date())
+            native_active,native_priority=conditional_paper.priority_assets(db,market.name,now.date())
             active_symbols={r[0].split(":",1)[1] for r in db.execute(
                 "SELECT asset FROM paper WHERE status='active' AND asset LIKE ?",(market.name+":%",))}
             # Do not grow the normal scan budget. Queue old qualified ideas
             # ahead of fresh rotation, with a bounded number per market.
-            priority=[symbol for symbol in priority if symbol in symbols and symbol not in active_symbols]
-            if priority:
-                active_first=[s for s in selected if s in active_symbols]
-                broad=[s for s in selected if s not in active_symbols and s not in priority]
+            active_first=[s for s in selected if s in active_symbols]
+            active_first=list(dict.fromkeys(active_first+native_active))
+            priority=list(dict.fromkeys(s for s in priority+native_priority if s in symbols and s not in active_first))
+            if priority or native_active:
+                broad=[s for s in selected if s not in active_first and s not in priority]
                 selected=(active_first+priority+broad)[:max(asset_limit or universe.LIMITS[market.name],len(active_first))]
             for symbol in reversed(cohort.active_assets(db, market)):
                 if symbol not in selected:
@@ -432,6 +445,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 if market.name==name:
                     priority={r[0].split(":",1)[1] for r in db.execute(
                         "SELECT asset FROM paper WHERE status='active' AND asset LIKE ?",(name+":%",))}
+                    priority.update(conditional_paper.priority_assets(db,market.name,now.date())[0])
                     priority.update(cohort.active_assets(db,market))
                     if symbol not in priority:
                         if symbol in selected:
@@ -447,6 +461,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     general_deadline=deadline-focus_seconds if focus_asset else deadline
     paper_remaining={r[0] for r in db.execute("SELECT asset FROM paper WHERE status='active'")
                      if r[0].split(":",1)[0] in catalogs}
+    paper_remaining.update(r[0] for r in db.execute("SELECT DISTINCT asset FROM native_paper_candidates WHERE status=?",(conditional_paper.ACTIVE,))
+                           if r[0].split(":",1)[0] in catalogs)
     focus_data=None
     report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}, "markets": market_reports,
               "event_sources": event_coverage}
@@ -609,6 +625,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 report["assets"][asset] = {"error": failure, "coverage": status}
                 with db:
                     universe.record(db, market.name, symbol, now, status)
+                    conditional_paper.observe_unavailable(db,asset,failure,now)
                     if tracked:
                         db.execute("INSERT OR REPLACE INTO paper_data_issues VALUES (?,?)", (asset, failure))
                     if tracked or symbol in market.symbols:
@@ -672,6 +689,17 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 db.execute("RELEASE paper_admission")
         report["paper_admission"]={**paper_admission.summary(db),"recovered_nominations":recovered_nominations,
                                    "new_nominations":new_nominations,"archive_recovery":archive_recovery,"this_run":admissions}
+        native_new=conditional_paper.harvest(db)
+        db.execute("SAVEPOINT conditional_native_cycle")
+        try:
+            native_result=conditional_paper.run(db,aligned_panel,aligned_markets,event_dates,calendar_cutoffs,now)
+        except Exception as exc:
+            db.execute("ROLLBACK TO conditional_native_cycle")
+            native_result={"status":"error","error":str(exc)[:220],"checked_this_run":0}
+        finally:
+            db.execute("RELEASE conditional_native_cycle")
+        report["conditional_paper"]={**conditional_paper.summary(db),"old_candidates_harvested":native_harvested,
+            "new_candidates_harvested":native_new,"archive_recovery":native_archive_recovery,"this_run":native_result}
     report["new_coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (coverage.VERSION, first_technical)).fetchone()[0]
     report["new_combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (combination_research.VERSION, first_technical)).fetchone()[0]
     report["combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (combination_research.VERSION,)).fetchone()[0]
