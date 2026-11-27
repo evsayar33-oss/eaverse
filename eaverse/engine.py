@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, combination_focus, combination_research, coverage, data, events, foundry, history_sources, indicator_research, model_research, paper_archive, qualification, reference, research, universe
+from . import cohort, combination_focus, combination_research, coverage, cross_asset_research, data, events, foundry, history_sources, indicator_research, model_research, paper_archive, qualification, reference, research, universe
 
 
 SCHEMA = """
@@ -439,6 +439,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}, "markets": market_reports,
               "event_sources": event_coverage}
     daily_records = []
+    aligned_panel = {}
     # Interleave providers and give active PAPER rows the first slots on their market.
     scheduled = []
     while queues:
@@ -490,6 +491,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             if asset==focus_asset:
                 focus_data=(market,bars,failure)
             if failure is None:
+                aligned_panel[asset] = bars
                 try:
                     with db:
                         paper, paper_error = None, None
@@ -606,6 +608,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             general_deadline=deadline
     if focus_asset and not focus_done:
         execute_focus()
+    with db:
+        report["cross_asset_research"] = cross_asset_research.run(db, aligned_panel)
     report["history_summary"]={}
     for name in market_reports:
         rows=[dict(r) for r in db.execute("SELECT * FROM history_coverage WHERE asset LIKE ?",(name+":%",))]
