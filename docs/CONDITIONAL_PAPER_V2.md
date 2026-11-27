@@ -54,3 +54,6 @@ Ordinary legacy candidates rejected solely under the old percentage rule are
 eligible for fresh verification, including missing historical validation if the
 original discovery evidence was sufficient. Missing data/source/calendar
 evidence is explicitly identified rather than synthesized.
+
+## Cross-market data routing and ordinary wait handoff
+The backlog binds each asset to its original market/provider before fetching. After the separate normal PAPER admission stage, all remaining eligible original legacy nominations are handed into conditional evaluation using the original 2-open delayed long-only executor, independent scalar return verification, actual recovery path and unchanged identities. No normal PAPER quota can block conditional evaluation. The original nomination is retained with a handoff status.

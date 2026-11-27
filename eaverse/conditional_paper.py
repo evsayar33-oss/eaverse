@@ -28,6 +28,7 @@ from . import (combination_research as combo, coverage, data, events, foundry,
 
 VERSION = "conditional-native-paper-v2"
 LEGACY_ADAPTER_HASH = "bf71b0e182624cee748eba5fc73dbb76339be5d87c479ac24d382a22cfbad7fc"
+PRE_HANDOFF_ADAPTER_HASH = "2f5f66d41ccc3c0b7139815dfb8f07bb6d03ec4c98a44a0f51c1f5a1f94423f3"
 ENGINES = (coverage.VERSION, foundry.VERSION, combo.VERSION, indicator.VERSION)
 POLICIES = {coverage.VERSION:coverage.POLICY,foundry.VERSION:foundry.POLICY,
             combo.VERSION:combo.POLICY,indicator.VERSION:indicator.POLICY}
@@ -120,6 +121,10 @@ def record_status(row):
 def verify_record(row):
     d,v,train,valid=metrics_pair(row)
     spec=json.loads(row["spec"])
+    if row["version"]==research.VERSION:
+        if research.digest(spec)!=row["id"] or json.loads(row["policy"]) not in (research.POLICY,research.LEGACY_POLICY):
+            raise ValueError("legacy identity or frozen executable policy mismatch")
+        return {**spec,"frame":"1d","direction":"long"}
     if row["version"] not in ENGINES or research.digest([row["version"],spec])!=row["id"]:
         raise ValueError("native identity mismatch")
     original=json.loads(row["policy"]);expected=POLICIES[row["version"]]
@@ -177,6 +182,39 @@ def harvest(db):
         added+=1
     return added
 
+
+def harvest_legacy(db,now):
+    """Move ordinary candidates left in the old admission queue into independent
+    conditional observations, retaining the original nomination and identity.
+
+    A missing old validation is evaluated with real data, never inferred.
+    """
+    moved=0
+    rows=list(db.execute("SELECT * FROM paper_candidates WHERE status='waiting' ORDER BY nominated_asof,asset,id"))
+    for row in rows:
+        original=json.loads(row["record"])
+        status="queued";reason=None
+        try:
+            verify_record(original)
+            d,v,train,valid=metrics_pair(original)
+            if (d.get("superlab_receipt") or {}).get("status")=="INVALID_EVIDENCE" or (v.get("execution_audit") or {}).get("status")=="mismatch":
+                raise ValueError("legacy central or independent audit rejected")
+            if original["asset"]!=row["asset"] or original["source"]!=row["source"] or original["id"]!=row["id"]:
+                raise ValueError("legacy nomination provenance mismatch")
+        except (ValueError,KeyError,TypeError,IndexError,ArithmeticError) as exc:
+            status="invalid_evidence";reason=str(exc)[:220]
+            train={};valid={}
+        db.execute("""INSERT OR IGNORE INTO native_paper_candidates
+            (version,asset,id,source,family,asof,record,initial,status,reason)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (row["version"],row["asset"],row["id"],row["source"],original.get("family","legacy"),
+             row["nominated_asof"],canonical(original),canonical({"discovery":train,"validation":valid}),
+             status,reason))
+        db.execute("""UPDATE paper_candidates SET status='conditional_handoff',reason=?,checked_at=?
+            WHERE asset=? AND version=? AND id=?""",
+            ("independent uncapped conditional evaluation",now.isoformat(),row["asset"],row["version"],row["id"]))
+        moved+=1
+    return moved
 
 def migrate_policy(db,now):
     """Reopen v1 percent-risk decisions once, retain old decision and forward evidence."""
@@ -338,7 +376,14 @@ def prepare(version,spec,bars,market,dates,cutoffs):
         current=current.loc[:min(cutoffs[n] for n in names)]
     if len(current)<120:
         raise Waiting("waiting_history","fewer than 120 eligible bars")
-    if version==coverage.VERSION:
+    if version==research.VERSION:
+        if len(current)<600:
+            raise Waiting("waiting_history","legacy executor requires 600 completed bars")
+        warm=200
+        target=research.target(current,research.features(current,[spec]),
+                               spec,365 if market.calendar is None else 252)
+        valid=pd.Series(True,index=current.index)
+    elif version==coverage.VERSION:
         warm=coverage.warmup_for(spec)
         target=coverage.desired(current,spec,dates,365 if market.calendar is None else 252)
         valid=pd.Series(True,index=current.index)
@@ -411,6 +456,16 @@ def coverage_reference(bars,weights,start,stop,cost_bps):
 def fold(version,current,target,start,stop,spec,cost):
     if stop-start<2:
         raise Waiting("waiting_history","insufficient executable fold")
+    if version==research.VERSION:
+        returns,trades,_=research.simulation(current,target,current.index[start],current.index[stop-1],2*cost,delay=2)
+        metrics=research.stats(returns,trades)
+        metrics.update(status="evaluated" if trades else "no_entries")
+        ref=coverage_reference(current,target.shift(1).fillna(0),start,stop,cost)
+        if ref["status"]=="ruin_stress":
+            return {**ref,"ruin":True}
+        if any(not math.isclose(ref[k],metrics[k],abs_tol=1e-9,rel_tol=1e-9) for k in ("net","drawdown")):
+            raise ValueError("legacy independent replay mismatch")
+        return {**metrics,**{k:v for k,v in ref.items() if k not in metrics and k!="entries"}}
     if version==coverage.VERSION:
         metrics=coverage.evaluate_fold(current,target,start,stop,cost)
         ref=coverage_reference(current,target,start,stop,cost)
@@ -439,7 +494,11 @@ def evaluate(row,bars,market,dates,cutoffs):
     if str(current.index[-1].date())<row["asof"]:
         raise Waiting("waiting_history","current source no longer covers original evaluation cutoff")
     boundary=warm+(len(current)-warm)*3//4
-    if any(valid.iloc[a:b].mean()<.8 for a,b in ((warm,boundary),(boundary,len(current)))):
+    end_discovery=boundary
+    if version==research.VERSION:
+        boundary=len(current)-research.MIN_VALIDATION_BARS
+        end_discovery=boundary-4
+    if any(valid.iloc[a:b].mean()<.8 for a,b in ((warm,end_discovery),(boundary,len(current)))):
         raise Waiting("waiting_history","insufficient defined signals")
     # Preserve event occurrence rules from the original research lane.
     if version==combo.VERSION and spec["events"]:
@@ -453,7 +512,7 @@ def evaluate(row,bars,market,dates,cutoffs):
         mask=coverage.event_mask(current.index,names[0],dates)
         if not mask.iloc[warm:boundary].any() or not mask.iloc[boundary:].any():
             raise Waiting("waiting_calendar","insufficient original macro occurrences")
-    train=fold(version,current,target,warm,boundary,spec,market.cost_bps)
+    train=fold(version,current,target,warm,end_discovery,spec,market.cost_bps)
     validm=fold(version,current,target,boundary,len(current),spec,market.cost_bps)
     reason=initial_gate(train,validm)
     if not reason:
@@ -485,7 +544,7 @@ def evaluate(row,bars,market,dates,cutoffs):
        "risk_policy":recovery_risk.VERSION,
        "current_snapshot":data.fingerprint(current),"from":str(current.index[0].date()),
        "asof":str(current.index[-1].date()),"bars":len(current),
-       "arithmetic_audit":"independent_open_replay" if version==coverage.VERSION else "native_return_path_compounding",
+       "arithmetic_audit":"independent_open_replay" if version in (coverage.VERSION,research.VERSION) else "native_return_path_compounding",
        "superlab_receipt":receipt,"retrospective_only":True,"live_allowed":False}
     return spec,current,q,names
 
@@ -544,7 +603,7 @@ def admit(db,row,bars,market,dates,cutoffs,now):
 def advance(db,row,bars,market,dates,cutoffs,now):
     state=json.loads(row["forward"]);original=json.loads(row["record"])
     spec=verify_record(original);version=row["version"]
-    if state["adapter_sha256"] not in (adapter_hash(),LEGACY_ADAPTER_HASH) or state["source"]!=market.source or state["cost_bps"]!=market.cost_bps:
+    if state["adapter_sha256"] not in (adapter_hash(),LEGACY_ADAPTER_HASH,PRE_HANDOFF_ADAPTER_HASH) or state["source"]!=market.source or state["cost_bps"]!=market.cost_bps:
         raise ValueError("frozen native executor/source/cost changed")
     base=bars.loc[state["data_start"]:]
     previous=base.loc[:state["data_through"]]
@@ -560,7 +619,7 @@ def advance(db,row,bars,market,dates,cutoffs,now):
         raise Waiting("waiting_calendar","calendar/data cutoff moved backward")
     future=forward_window(current,spec["frame"],state["registered_date"])
     # Coverage measures open-to-open returns, requiring a further observation.
-    completed=max(0,len(future)-(1 if version==coverage.VERSION else 0))
+    completed=max(0,len(future)-(1 if version in (coverage.VERSION,research.VERSION) else 0))
     observed=min(FORWARD_BARS,completed)
     if observed<state["observed_bars"]:
         raise ValueError("native PAPER observations moved backward")
@@ -573,7 +632,7 @@ def advance(db,row,bars,market,dates,cutoffs,now):
     status=ACTIVE
     if observed>=2:
         first=int(future[0])
-        stop=first+observed+(1 if version==coverage.VERSION else 0)
+        stop=first+observed+(1 if version in (coverage.VERSION,research.VERSION) else 0)
         metrics=fold(version,current,target,first,stop,spec,market.cost_bps)
         state.update(metrics=metrics,first_observed=str(current.index[first].date()),
                      observed_through=str(current.index[stop-1].date()),
@@ -704,8 +763,8 @@ def summary(db):
         ORDER BY CASE status WHEN 'conditional_active' THEN 0 ELSE 1 END,checked DESC,asset,id"""):
         q=json.loads(r["qualification"] or "{}");f=json.loads(r["forward"] or "{}")
         spec=json.loads(json.loads(r["record"])["spec"]) if r["record"] else {}
-        rows.append({"asset":r["asset"],"engine":r["version"],"id":r["id"],"frame":spec.get("frame"),
-             "direction":spec.get("direction"),"status":r["status"],"reason":r["reason"],
+        rows.append({"asset":r["asset"],"engine":r["version"],"id":r["id"],"frame":spec.get("frame","1d" if r["version"]==research.VERSION else None),
+             "direction":spec.get("direction","long" if r["version"]==research.VERSION else None),"status":r["status"],"reason":r["reason"],
              "historical_net":q.get("validation",{}).get("net"),"historical_drawdown":q.get("validation",{}).get("drawdown"),
              "historical_recovery_days":(q.get("continuous") or {}).get("max_recovery_days"),
              "forward_recovery_days":f.get("metrics",{}).get("max_recovery_days"),
@@ -716,7 +775,7 @@ def summary(db):
     decisions=[]
     for r in db.execute("""SELECT version,asset,id,asof,status,reason,initial FROM native_paper_candidates
         ORDER BY CASE status WHEN 'conditional_active' THEN 0 WHEN 'qualified_waiting_capacity' THEN 1
-        WHEN 'queued' THEN 2 ELSE 3 END,asset,version,id LIMIT 5000"""):
+        WHEN 'queued' THEN 2 ELSE 3 END,asset,version,id LIMIT 20000"""):
         evidence=json.loads(r["initial"])
         decisions.append({"engine":r["version"],"asset":r["asset"],"id":r["id"],"asof":r["asof"],
                           "status":r["status"],"reason":r["reason"],"discovery_net":evidence["discovery"].get("net"),
