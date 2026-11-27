@@ -23,6 +23,8 @@ Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Canlı ABD li
 
 Yeni [24 aileli genişletilmiş indikatör araştırması](docs/INDICATOR_RESEARCH_V1.md) günlük ve haftalık tekli/çoklu deneyleri kendi kalıcı kuyruğunda yürütür. Tamamlanan testler panelde ayrı sayaçlarla yayımlanır; mevcut PAPER denemeleri değişmez.
 
+Her varlık için ayrı, işlem yetkisi olmayan istatistiksel model kaydı da tutulur: train-only seçilmiş GARCH(1,1), Gradient Boosting oynaklık düzeltmesi, üç durumlu Gaussian Mixture rejimi ve “eğitim çoğunluk yönü” taban modeline karşı Random Forest negatif kontrolü. Ayrım kronolojiktir; rejim adları yalnız eğitim oynaklığıyla atanır. Bu kayıtlar PAPER adayı üretemez ve bağımsız Quant Superlab doğrulaması olmadan botlara aktarılmaz.
+
 [Ortak kombinasyon kapsamı](docs/COMBINATION_COVERAGE_V1.md) yeni ve eski teknik aileleri, takvim, makro ve OHLCV olaylarını varlık bazlı kalıcı kuyrukta çapraz sınar. Kayıtlı, tamamlanan ve bekleyen kapsam ayrı raporlanır.
 
 ## Haber ve takvim deneyleri
