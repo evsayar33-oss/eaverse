@@ -116,10 +116,10 @@ def date(index_value):
 def update_pending_paper_policy(db, now):
     # The initial checkpoint may contain proposals from the first publication.
     # Upgrade only experiments whose first eligible opening has not occurred.
-    previous = {key: value for key, value in research.POLICY.items() if key != "paper_execution_delay_bars"}
+    previous = {key: value for key, value in research.LEGACY_POLICY.items() if key != "paper_execution_delay_bars"}
     db.execute(
         "UPDATE paper SET policy=? WHERE status='active' AND cursor IS NULL AND start > ? AND policy=?",
-        (research.canonical(research.POLICY), now.date().isoformat(), research.canonical(previous)),
+        (research.canonical(research.LEGACY_POLICY), now.date().isoformat(), research.canonical(previous)),
     )
 
 
@@ -128,13 +128,14 @@ def recheck_pending(db, asset, market, bars, now):
     row = db.execute("""SELECT * FROM paper WHERE asset=? AND status='active'
                         AND cursor IS NULL AND sequence NOT IN (SELECT sequence FROM paper_progress)""",
                      (asset,)).fetchone()
-    if not row or row["version"] != research.VERSION or row["policy"] != research.canonical(research.POLICY):
+    if not row or row["version"] != research.VERSION or row["policy"] not in (research.canonical(research.POLICY),research.canonical(research.LEGACY_POLICY)):
         return
     window = bars.loc[row["anchor"]:row["cutoff"]]
-    if data.fingerprint(window) == row["digest"]:
+    policy_upgrade=row["policy"]==research.canonical(research.LEGACY_POLICY)
+    if data.fingerprint(window) == row["digest"] and not policy_upgrade:
         return
     origin = json.loads(row["origin"])
-    if origin.get("replaces"):
+    if origin.get("replaces") and not policy_upgrade:
         # A replacement is allowed once, not forever. Preserve both the
         # original and replacement records and release this unusable slot.
         evidence={"reason":"repeated_origin_revision_before_first_observation",
@@ -163,7 +164,7 @@ def recheck_pending(db, asset, market, bars, now):
     revised["validation"]["execution_audit"] = reference.audit_validation(
         bars.loc[:row["cutoff"]], weights, row["cost"], revised["validation"])
     accepted = all(block["pass"] for block in revised.values()) and revised["validation"]["execution_audit"]["status"] != "mismatch"
-    evidence = {"reason": "origin_revision_before_first_observation", "revalidation": revised,
+    evidence = {"reason": "recovery_policy_upgrade_before_first_observation" if policy_upgrade else "origin_revision_before_first_observation", "revalidation": revised,
                 "checked_at": now.isoformat(), "replacement_eligible": accepted}
     db.execute("UPDATE paper SET status='revised_before_start',result=? WHERE sequence=?",
                (research.canonical(evidence), row["sequence"]))
@@ -179,7 +180,7 @@ def recheck_pending(db, asset, market, bars, now):
         inserted=db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
                       VALUES(?,?,?,?,?,?,?,?,?,?,'active')""",
                    (asset,row["spec"],row["cost"],start,date(anchor.index[0]),row["cutoff"],
-                    data.fingerprint(anchor),row["version"],row["policy"],research.canonical(origin)))
+                    data.fingerprint(anchor),row["version"],research.canonical(research.POLICY),research.canonical(origin)))
         frozen=db.execute("SELECT * FROM paper WHERE sequence=?",(inserted.lastrowid,)).fetchone()
         paper_archive.capture(db,frozen,anchor)
 
@@ -207,7 +208,7 @@ def advance_paper(db, asset, bars):
     row = db.execute("SELECT * FROM paper WHERE asset = ? AND status = 'active'", (asset,)).fetchone()
     if row is None:
         return None
-    if row["version"] != research.VERSION or row["policy"] != research.canonical(research.POLICY):
+    if row["version"] != research.VERSION or row["policy"] not in (research.canonical(research.POLICY),research.canonical(research.LEGACY_POLICY)):
         raise ValueError("PAPER engine version changed; frozen experiment needs its original engine")
     anchored = bars.loc[row["anchor"]:]
     if data.fingerprint(anchored.loc[:row["cutoff"]]) != row["digest"]:
@@ -231,7 +232,7 @@ def advance_paper(db, asset, bars):
     if days:
         metrics, returns, benchmark = research.paper_metrics(
             anchored, desired, row["start"], stop, row["cost"], row["sequence"],
-            final=days >= research.PAPER_BARS, periods=periods,
+            final=days >= research.PAPER_BARS, periods=periods,frozen_policy=json.loads(row["policy"]),
         )
         observed_opens = observed.loc[:stop].index[1:]
         progress = {
@@ -366,6 +367,50 @@ def fetch_bars(market, symbol, now):
         return None, f"{type(exc).__name__}: {exc}"[:300]
 
 
+def process_native_backlog(db,market_names,aligned_panel,aligned_markets,dates,cutoffs,now,seconds=conditional_paper.BACKLOG_SECONDS):
+    """Separate data-only lane; one download per asset for all candidate strategies."""
+    started=time.monotonic()
+    fetch_deadline=started+seconds/3
+    markets={m.name:m for m in data.MARKETS if m.name in market_names}
+    queues=[]
+    for name,market in markets.items():
+        active,pending=conditional_paper.priority_assets(db,name,now.date())
+        # Interleave active observations and new work; neither can monopolize data.
+        ordered=[]
+        from itertools import zip_longest
+        for a,b in zip_longest(active,pending):
+            for symbol in (a,b):
+                if symbol and symbol not in ordered:
+                    ordered.append(symbol)
+        queues.append(iter((market,symbol) for symbol in ordered if f"{name}:{symbol}" not in aligned_panel))
+    scheduled=[]
+    while queues:
+        remaining=[]
+        for queue in queues:
+            item=next(queue,None)
+            if item:
+                scheduled.append(item);remaining.append(queue)
+        queues=remaining
+    fetched=0;failed=0
+    for offset in range(0,len(scheduled),8):
+        if time.monotonic()>=fetch_deadline:
+            break
+        batch=[(history_sources.market_for_symbol(m,s),s) for m,s in scheduled[offset:offset+8]]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results=list(executor.map(lambda item:fetch_bars(*item,now),batch))
+        for (m,s),(bars,error) in zip(batch,results,strict=True):
+            asset=f"{m.name}:{s}"
+            if error:
+                conditional_paper.observe_unavailable(db,asset,error,now)
+                failed+=1
+            else:
+                aligned_panel[asset]=bars;aligned_markets[asset]=m;fetched+=1
+    result=conditional_paper.run(db,aligned_panel,aligned_markets,dates,cutoffs,now,
+                                 seconds=max(1,seconds-(time.monotonic()-started)))
+    return {**result,"data_only_fetched":fetched,"data_only_unavailable":failed,
+            "data_only_remaining":max(0,len(scheduled)-fetched-failed)}
+ 
+ 
 def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report=None, *,
         focus_seconds=combination_focus.SECONDS, focus_slots=combination_focus.MAX_SLOTS):
     now = datetime.now(UTC)
@@ -375,26 +420,19 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     with db:
         update_pending_paper_policy(db, now)
         recovered_nominations=paper_admission.seed(db)
+        native_migrated=conditional_paper.migrate_policy(db,now)
         native_harvested=conditional_paper.harvest(db)
         native_archive_recovery=[]
         archive_recovery={"status":"not_requested","added":0}
         if os.getenv("GITHUB_ACTIONS") == "true":
             db.execute("SAVEPOINT candidate_archive")
             try:
-                archive_recovery=paper_admission.recover_one_archive(db)
+                archive_recovery=paper_admission.recover_archives(db,now)
             except Exception as exc:
                 db.execute("ROLLBACK TO candidate_archive")
                 archive_recovery={"status":"error","error":str(exc)[:200],"added":0}
             finally:
                 db.execute("RELEASE candidate_archive")
-            db.execute("SAVEPOINT native_archive")
-            try:
-                native_archive_recovery=conditional_paper.recover_archives(db,now)
-            except Exception as exc:
-                db.execute("ROLLBACK TO native_archive")
-                native_archive_recovery=[{"status":"error","error":str(exc)[:220]}]
-            finally:
-                db.execute("RELEASE native_archive")
         if os.getenv("GITHUB_ACTIONS") == "true":
             from . import ideas
             ideas.refresh(db)
@@ -419,15 +457,13 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             health(db, f"listings:{market.name}", "live listing catalog unavailable or stale" if stale_listing else None)
             selected = universe.queue(db, market, symbols, now.date(), asset_limit or universe.LIMITS[market.name])
             priority=paper_admission.priority_assets(db,market.name,now.date())
-            native_active,native_priority=conditional_paper.priority_assets(db,market.name,now.date())
             active_symbols={r[0].split(":",1)[1] for r in db.execute(
                 "SELECT asset FROM paper WHERE status='active' AND asset LIKE ?",(market.name+":%",))}
             # Do not grow the normal scan budget. Queue old qualified ideas
             # ahead of fresh rotation, with a bounded number per market.
             active_first=[s for s in selected if s in active_symbols]
-            active_first=list(dict.fromkeys(active_first+native_active))
-            priority=list(dict.fromkeys(s for s in priority+native_priority if s in symbols and s not in active_first))
-            if priority or native_active:
+            priority=list(dict.fromkeys(s for s in priority if s in symbols and s not in active_first))
+            if priority:
                 broad=[s for s in selected if s not in active_first and s not in priority]
                 selected=(active_first+priority+broad)[:max(asset_limit or universe.LIMITS[market.name],len(active_first))]
             for symbol in reversed(cohort.active_assets(db, market)):
@@ -445,7 +481,6 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 if market.name==name:
                     priority={r[0].split(":",1)[1] for r in db.execute(
                         "SELECT asset FROM paper WHERE status='active' AND asset LIKE ?",(name+":%",))}
-                    priority.update(conditional_paper.priority_assets(db,market.name,now.date())[0])
                     priority.update(cohort.active_assets(db,market))
                     if symbol not in priority:
                         if symbol in selected:
@@ -461,8 +496,6 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     general_deadline=deadline-focus_seconds if focus_asset else deadline
     paper_remaining={r[0] for r in db.execute("SELECT asset FROM paper WHERE status='active'")
                      if r[0].split(":",1)[0] in catalogs}
-    paper_remaining.update(r[0] for r in db.execute("SELECT DISTINCT asset FROM native_paper_candidates WHERE status=?",(conditional_paper.ACTIVE,))
-                           if r[0].split(":",1)[0] in catalogs)
     focus_data=None
     report = {"time": now.isoformat(), "policy": research.POLICY, "assets": {}, "markets": market_reports,
               "event_sources": event_coverage}
@@ -690,16 +723,25 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
         report["paper_admission"]={**paper_admission.summary(db),"recovered_nominations":recovered_nominations,
                                    "new_nominations":new_nominations,"archive_recovery":archive_recovery,"this_run":admissions}
         native_new=conditional_paper.harvest(db)
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            db.execute("SAVEPOINT native_archive")
+            try:
+                native_archive_recovery=conditional_paper.recover_archives(db,now)
+            except Exception as exc:
+                db.execute("ROLLBACK TO native_archive")
+                native_archive_recovery=[{"status":"error","error":str(exc)[:220]}]
+            finally:
+                db.execute("RELEASE native_archive")
         db.execute("SAVEPOINT conditional_native_cycle")
         try:
-            native_result=conditional_paper.run(db,aligned_panel,aligned_markets,event_dates,calendar_cutoffs,now)
+            native_result=process_native_backlog(db,market_names,aligned_panel,aligned_markets,event_dates,calendar_cutoffs,now)
         except Exception as exc:
             db.execute("ROLLBACK TO conditional_native_cycle")
             native_result={"status":"error","error":str(exc)[:220],"checked_this_run":0}
         finally:
             db.execute("RELEASE conditional_native_cycle")
         report["conditional_paper"]={**conditional_paper.summary(db),"old_candidates_harvested":native_harvested,
-            "new_candidates_harvested":native_new,"archive_recovery":native_archive_recovery,"this_run":native_result}
+            "new_candidates_harvested":native_new,"risk_policy_migrated":native_migrated,"archive_recovery":native_archive_recovery,"this_run":native_result}
     report["new_coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (coverage.VERSION, first_technical)).fetchone()[0]
     report["new_combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (combination_research.VERSION, first_technical)).fetchone()[0]
     report["combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (combination_research.VERSION,)).fetchone()[0]

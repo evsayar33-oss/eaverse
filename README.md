@@ -12,18 +12,16 @@ Araştırma işi tanımlı kamuya açık depoların README sürümlerini kontrol
 | BIST | KAP BIST şirketleri | Yahoo | 32 |
 | Kripto | Coinbase Exchange aktif USD spot pariteleri | Coinbase Exchange | 24 |
 
-Günde altı tur planlanır. Liste kaynakları günlük yenilenir. Canlı ABD listesi erişilemezse son başarılı liste veya tarihli SEC kopyası kullanılır. Rapor canlı liste, önbellek ve bu kopyayı ayırt eder. Kuyruk her turda aktif PAPER varlıklarına öncelik verir. Kalan kapasite yeni sembollere ve daha önce işlem verisi doğrulanan varlıklara ayrılır. Her aday en az 600 ardışık tamamlanmış günlük bar ister. Yeni kotlar ve fiyat verisi eksik semboller raporda ayrı görünür. Listenin tamamı birden çok turda taranır. Mevcut BIST ve ABD listeleri geçmiş endeks üyeliğini, delist verisini ve geçmişteki tüm şirketleri kapsamaz.
+Saatte bir tur planlanır; aynı anda yalnızca bir kalıcı araştırma turu çalışır. Liste kaynakları günlük yenilenir. Canlı ABD listesi erişilemezse son başarılı liste veya tarihli SEC kopyası kullanılır. Rapor canlı liste, önbellek ve bu kopyayı ayırt eder. Kuyruk her turda aktif PAPER varlıklarına öncelik verir. Kalan kapasite yeni sembollere ve daha önce işlem verisi doğrulanan varlıklara ayrılır. Her aday en az 600 ardışık tamamlanmış günlük bar ister. Yeni kotlar ve fiyat verisi eksik semboller raporda ayrı görünür. Listenin tamamı birden çok turda taranır. Mevcut BIST ve ABD listeleri geçmiş endeks üyeliğini, delist verisini ve geçmişteki tüm şirketleri kapsamaz.
 
 ## Teknik deneyler
 
 - Temel katalogda 34.636 yapı vardır. Araştırma SMA, EMA, momentum, kırılım, RSI, hacim, oynaklık, ATR ve Bollinger'a ek olarak MACD, stokastik, ADX, OBV, hacim ağırlıklı ortalama ve ortalamaya dönüş kurallarını dener.
 - Keşif aynı göstergeyi farklı pencere ve eşiklerle, tek başına veya birden çok koşulla sınar. Oy eşiği, sinyal teyidi ve pozisyon boyutu da değişebilir. Uygun keşif sonuçları, aynı varlık veya başka piyasalarda benzer kuralları denemek için başlangıç olarak kullanılır.
 - Varlık başına bir turda en fazla 24 yeni teknik deneme yapılır. Deneme kimlikleri tekrarları önlemek için saklanır. Aday seçimi keşif dönemine dayanır. Üç kronolojik bölümde çift maliyet ve gecikme uygulanır. Aday daha yakın 180 günlük pencerede yeniden taranır. Tarihsel dönemler tekrar kullanılabilir ve bu tarama ileri tarihli kanıtın öncesindeki elemedir.
-- Kripto adayında kural, maliyet, veri parmak izi ve ilk sanal işlem tarihi sabitlenir. Bir varlıkta aynı anda bir PAPER deneyi ve depoda en fazla 12 aktif PAPER deneyi olabilir. Piyasanın günlük kapanışı yayımlandıktan sonra bir bar beklenir. PAPER doğrulaması 90 getiri barı, en az sekiz tamamlanmış işlem, çift maliyet sonrası nakit ve al-tut kıyaslarının aşılması, en fazla %25 düşüş ve çoklu testleri hesaba katan ön kayıtlı yaklaşık HAC eşiği ister.
+- Kripto adayında kural, maliyet, veri parmak izi ve ilk sanal işlem tarihi sabitlenir. Normal PAPER ayrı ve dondurulmuş bir protokoldür; genişletilmiş koşullu PAPER için aday, varlık veya piyasa kotası yoktur. Piyasanın günlük kapanışı yayımlandıktan sonra bir bar beklenir. PAPER doğrulaması 90 getiri barı, en az sekiz tamamlanmış işlem, çift maliyet sonrası nakit ve al-tut kıyaslarının aşılması, kasanın sıfırlanmaması, en fazla 180 takvim günlük zirveye dönüş süresi ve çoklu testleri hesaba katan ön kayıtlı yaklaşık HAC eşiği ister.
 
 Yeni [24 aileli genişletilmiş indikatör araştırması](docs/INDICATOR_RESEARCH_V1.md) günlük ve haftalık tekli/çoklu deneyleri kendi kalıcı kuyruğunda yürütür. Tamamlanan testler panelde ayrı sayaçlarla yayımlanır; mevcut PAPER denemeleri değişmez.
-
-Her varlık için ayrı, işlem yetkisi olmayan istatistiksel model kaydı da tutulur: train-only seçilmiş GARCH(1,1), Gradient Boosting oynaklık düzeltmesi, üç durumlu Gaussian Mixture rejimi ve “eğitim çoğunluk yönü” taban modeline karşı Random Forest negatif kontrolü. Ayrım kronolojiktir; rejim adları yalnız eğitim oynaklığıyla atanır. Bu kayıtlar PAPER adayı üretemez ve bağımsız Quant Superlab doğrulaması olmadan botlara aktarılmaz.
 
 [Ortak kombinasyon kapsamı](docs/COMBINATION_COVERAGE_V1.md) yeni ve eski teknik aileleri, takvim, makro ve OHLCV olaylarını varlık bazlı kalıcı kuyrukta çapraz sınar. Kayıtlı, tamamlanan ve bekleyen kapsam ayrı raporlanır.
 
@@ -60,3 +58,6 @@ Streamlit Community Cloud'da depo olarak `evsayar33-oss/eaverse`, dal olarak `ma
 Panel, araştırma işi kalıcı kaydı doğruladıktan sonra yayımlanan küçük bir JSON dosyasını okur. Panel için Streamlit secret'ı veya kişisel GitHub token'ı gerekmez. Açık panel, yayımlanan kaydı beş dakikada bir kontrol eder. Ölçümler araştırma turlarında ilerler. Telegram için GitHub Actions'ta yalnızca `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` gerekir. `github.token` GitHub tarafından iş çalışırken verilir.
 
 Aktif ve tamamlanan adaylar ayrı görüntülenebilir. PAPER sekmesi son tamamlanmış getiri barına kadar maliyet sonrası kümülatif getiri, al-tut ve nakit kıyası, düşüş ve işlem istatistiklerini gösterir. Yeterli seri oluştuğunda Sharpe, Sortino ve oynaklık görünür. İşlem kazanma oranı, beklenti ve kâr faktöründe tam kapanan pozisyon dönemleri sayılır. Geçmiş test sekmesi adayın izlemeye alınmadan önceki keşif ve yakın dönem testlerinin dondurulmuş değerlerini gösterir. Eski kayıtların saklamadığı alanlarda veya hesaplama için gözlem yetersizse değer boş kalır.
+
+
+Yeni risk ve koşullu PAPER sözleşmesi: [Capital survival and recovery v2](docs/CONDITIONAL_PAPER_V2.md). Tarihsel %25 kararları yalnızca eski sözleşmenin denetim kaydıdır.

@@ -24,21 +24,19 @@ import numpy as np
 import pandas as pd
 
 from . import (combination_research as combo, coverage, data, events, foundry,
-               indicator_bank, indicator_research as indicator, research, surface, universe)
+               indicator_bank, indicator_research as indicator, research, recovery_risk, surface, universe)
 
-VERSION = "conditional-native-paper-v1"
+VERSION = "conditional-native-paper-v2"
+LEGACY_ADAPTER_HASH = "bf71b0e182624cee748eba5fc73dbb76339be5d87c479ac24d382a22cfbad7fc"
 ENGINES = (coverage.VERSION, foundry.VERSION, combo.VERSION, indicator.VERSION)
 POLICIES = {coverage.VERSION:coverage.POLICY,foundry.VERSION:foundry.POLICY,
             combo.VERSION:combo.POLICY,indicator.VERSION:indicator.POLICY}
 FORWARD_BARS = 90
 MIN_ENTRIES = 6
 MIN_VALID_ENTRIES = 2
-DRAW_LIMIT = research.DRAWDOWN_LIMIT
-CAPACITY = {name:limit//2 for name,limit in universe.LIMITS.items()}
-PER_ASSET_ACTIVE = 3
-PRIORITY_ASSETS = 6
-MAX_SCREEN_PER_RUN = 192
-MAX_ARCHIVES_PER_RUN = 6
+ARCHIVE_WORKERS = 3
+ARCHIVE_SECONDS = 420
+BACKLOG_SECONDS = 1800
 # Legacy archive batches were larger than the current 16 MiB writer target.
 # Match the established durable-checkpoint expansion envelope; stream one row at a time.
 MAX_ARCHIVE_EXPANDED = 768 * 1024 * 1024
@@ -53,8 +51,14 @@ CREATE TABLE IF NOT EXISTS native_paper_candidates(
 CREATE INDEX IF NOT EXISTS native_paper_status ON native_paper_candidates(status,asset,checked);
 CREATE TABLE IF NOT EXISTS native_paper_archives(sha TEXT PRIMARY KEY,checked TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS native_paper_archive_attempts(sha TEXT PRIMARY KEY,checked TEXT NOT NULL,status TEXT NOT NULL,error TEXT);
+CREATE TABLE IF NOT EXISTS native_paper_policy_migration(
+ version TEXT NOT NULL,asset TEXT NOT NULL,id TEXT NOT NULL,policy TEXT NOT NULL,
+ previous TEXT NOT NULL,migrated TEXT NOT NULL,PRIMARY KEY(version,asset,id,policy));
+CREATE TABLE IF NOT EXISTS native_paper_restarts(
+ version TEXT NOT NULL,asset TEXT NOT NULL,id TEXT NOT NULL,stamp TEXT NOT NULL,
+ previous TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(version,asset,id,stamp));
 """
-PENDING = ("queued","waiting_source","waiting_calendar","waiting_history","qualified_waiting_capacity")
+PENDING = ("queued","waiting_source","waiting_calendar","waiting_history","qualified_waiting_capacity","policy_recheck")
 ACTIVE = "conditional_active"
 
 
@@ -79,7 +83,7 @@ def entries(m):
 
 
 def initial_gate(train,valid):
-    """Use the existing main research risk/trade standards, not new alpha claims."""
+    """Pre-screen known history without a percentage drawdown cutoff."""
     if not positive(train,valid):
         return "nonpositive_history"
     for m in (train,valid):
@@ -88,8 +92,8 @@ def initial_gate(train,valid):
         dd=m.get("drawdown")
         if not isinstance(dd,(int,float)) or not math.isfinite(dd) or dd<0:
             return "missing_risk_evidence"
-        if dd>DRAW_LIMIT:
-            return "historical_drawdown_limit"
+        if dd>=1 or m.get("net",0)<=-1:
+            return "capital_ruin"
     n,m=entries(train),entries(valid)
     if n is None or m is None:
         return "missing_trade_evidence"
@@ -174,6 +178,43 @@ def harvest(db):
     return added
 
 
+def migrate_policy(db,now):
+    """Reopen v1 percent-risk decisions once, retain old decision and forward evidence."""
+    rows=list(db.execute("""SELECT c.* FROM native_paper_candidates c
+        WHERE (c.status IN ('qualified_waiting_capacity','conditional_active','conditional_paused',
+                            'conditional_completed_positive','conditional_completed_failed')
+               OR (c.status IN ('screen_rejected','recheck_rejected') AND
+                   c.reason IN ('historical_drawdown_limit','chronological_fold_risk')))
+          AND NOT EXISTS (SELECT 1 FROM native_paper_policy_migration m
+             WHERE m.version=c.version AND m.asset=c.asset AND m.id=c.id AND m.policy=?)
+          AND (c.qualification IS NULL OR coalesce(json_extract(c.qualification,'$.risk_policy'),'')<>?)""",
+          (VERSION,recovery_risk.VERSION)))
+    for row in rows:
+        db.execute("INSERT INTO native_paper_policy_migration VALUES (?,?,?,?,?,?)",
+                   (row["version"],row["asset"],row["id"],VERSION,canonical(dict(row)),now.isoformat()))
+        if row["status"].startswith("conditional_"):
+            # A genuine observation is never overwritten; zero-bar experiments may
+            # be freshly registered after requalification. Old mature results stay sealed.
+            f=json.loads(row["forward"] or "{}")
+            if f.get("observed_bars",0)>0 or row["status"].startswith("conditional_completed"):
+                continue
+        original=json.loads(row["record"]) if row["record"] else dict(db.execute(
+            "SELECT * FROM attempts WHERE version=? AND asset=? AND id=?",
+            (row["version"],row["asset"],row["id"])).fetchone())
+        status,reason,train,valid=record_status(original)
+        details=None
+        if status=="queued":
+            try:
+                verify_record(original);details=canonical(original)
+            except (ValueError,KeyError,TypeError,IndexError,ArithmeticError) as exc:
+                status,reason="invalid_evidence",str(exc)[:220]
+        db.execute("""UPDATE native_paper_candidates SET status=?,reason=?,checked=NULL,
+            record=?,archive=coalesce(?,archive),initial=?,qualification=NULL,forward=NULL
+            WHERE version=? AND asset=? AND id=?""",
+            (status,reason,details,json.loads(original["discovered"]).get("archive"),
+             canonical({"discovery":train,"validation":valid}),row["version"],row["asset"],row["id"]))
+    return len(rows)
+
 def restore_archive(db,path,sha,expected,now):
     if not 0<expected<=30000 or path.stat().st_size>32*1024*1024:
         raise ValueError("archive outside size/count bounds")
@@ -223,7 +264,7 @@ def restore_archive(db,path,sha,expected,now):
     return restored
 
 
-def recover_archives(db,now):
+def recover_archives(db,now,seconds=ARCHIVE_SECONDS):
     """Fetch bounded independent archive groups; do not duplicate archived trials."""
     repo=os.environ["GITHUB_REPOSITORY"]
     rows=[dict(r) for r in db.execute("""SELECT h.sha,h.url,h.records,count(*) AS pending
@@ -231,9 +272,9 @@ def recover_archives(db,now):
         LEFT JOIN native_paper_archive_attempts a ON a.sha=h.sha
         WHERE c.status='awaiting_archive'
           AND (a.checked IS NULL OR substr(a.checked,1,10)<?
-               OR (a.status='pending' AND a.error='native archive expanded size cap'))
-        GROUP BY h.sha,h.url,h.records ORDER BY min(coalesce(a.checked,'')),pending DESC,h.sha LIMIT ?""",
-        (now.date().isoformat(),MAX_ARCHIVES_PER_RUN))]
+               OR a.status='recovered' OR (a.status='pending' AND a.error='native archive expanded size cap'))
+        GROUP BY h.sha,h.url,h.records ORDER BY min(coalesce(a.checked,'')),pending DESC,h.sha""",
+        (now.date().isoformat(),))]
     if not rows:
         return []
     from .delivery import gh
@@ -246,21 +287,26 @@ def recover_archives(db,now):
         gh("release","download",match[1],"-R",repo,"--pattern",name,"--dir",str(target))
         return target/name
     results=[]
-    with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(max_workers=3) as pool:
-        futures=[pool.submit(download,row,tmp) for row in rows]
-        for row,future in zip(rows,futures,strict=True):
-            db.execute("SAVEPOINT native_archive")
-            try:
-                n=restore_archive(db,future.result(),row["sha"],row["records"],now)
-                results.append({"sha":row["sha"],"status":"recovered","added":n})
-            except Exception as exc:
-                db.execute("ROLLBACK TO native_archive")
-                results.append({"sha":row["sha"],"status":"pending","reason":str(exc)[:180]})
-            finally:
-                db.execute("RELEASE native_archive")
-            last=results[-1]
-            db.execute("INSERT OR REPLACE INTO native_paper_archive_attempts VALUES (?,?,?,?)",
-                       (row["sha"],now.isoformat(),last["status"],last.get("reason")))
+    deadline=time.monotonic()+seconds
+    with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(max_workers=ARCHIVE_WORKERS) as pool:
+        for offset in range(0,len(rows),ARCHIVE_WORKERS):
+            if time.monotonic()>=deadline:
+                break
+            batch=rows[offset:offset+ARCHIVE_WORKERS]
+            futures=[pool.submit(download,row,tmp) for row in batch]
+            for row,future in zip(batch,futures,strict=True):
+                db.execute("SAVEPOINT native_archive")
+                try:
+                    n=restore_archive(db,future.result(),row["sha"],row["records"],now)
+                    results.append({"sha":row["sha"],"status":"recovered","added":n})
+                except Exception as exc:
+                    db.execute("ROLLBACK TO native_archive")
+                    results.append({"sha":row["sha"],"status":"pending","reason":str(exc)[:180]})
+                finally:
+                    db.execute("RELEASE native_archive")
+                last=results[-1]
+                db.execute("INSERT OR REPLACE INTO native_paper_archive_attempts VALUES (?,?,?,?)",
+                           (row["sha"],now.isoformat(),last["status"],last.get("reason")))
     return results
 
 
@@ -329,8 +375,9 @@ def prepare(version,spec,bars,market,dates,cutoffs):
 def coverage_reference(bars,weights,start,stop,cost_bps):
     """Scalar, independently implemented open-to-open replay of the coverage model."""
     equity=peak=1.;drawdown=0.;marked=0.;previous=0.;n=0;fee=2*cost_bps/10000
+    path=[]
     values=weights.to_numpy(dtype=float);opens=bars.open.to_numpy(dtype=float)
-    highs=bars.high.to_numpy(dtype=float)
+    highs=bars.high.to_numpy(dtype=float);lows=bars.low.to_numpy(dtype=float)
     elapsed=np.diff(bars.index.to_numpy())/np.timedelta64(1,"D")
     for i in range(start,stop-1):
         w=float(values[i-1]) if i else 0.
@@ -343,14 +390,22 @@ def coverage_reference(bars,weights,start,stop,cost_bps):
         previous=w
         if gross<=0 or 1+w*(float(highs[i])/op-1)<=0:
             return {"net":-1.,"drawdown":1.,"entries":n,"status":"ruin_stress"}
-        factor=(1-fee*abs(w-marked))*gross
+        charge=1-fee*abs(w-marked)
+        adverse=(lows[i] if w>=0 else highs[i])/op-1
+        stressed=charge*(1+w*adverse-max(-w,0)*.05*days/365)
+        if stressed<=0:
+            return {"net":-1.,"drawdown":1.,"entries":n,"status":"ruin_stress","ruin":True,"stress":"fee_borrow_adverse"}
+        factor=charge*gross
         marked=w*(1+change)/gross
         if i==stop-2:
             factor*=1-fee*abs(marked)
         if factor<=0:
             return {"net":-1.,"drawdown":1.,"entries":n,"status":"ruin_stress"}
+        path.append(factor-1.)
         equity*=factor;peak=max(peak,equity);drawdown=max(drawdown,1-equity/peak)
-    return {"net":equity-1,"drawdown":drawdown,"entries":n,"status":"evaluated" if n else "no_entries"}
+    result={"net":equity-1,"drawdown":drawdown,"entries":n,"status":"evaluated" if n else "no_entries"}
+    result.update(recovery_risk.measure(path,bars.index[start+1:stop],bars.index[start]))
+    return result
 
 
 def fold(version,current,target,start,stop,spec,cost):
@@ -359,16 +414,21 @@ def fold(version,current,target,start,stop,spec,cost):
     if version==coverage.VERSION:
         metrics=coverage.evaluate_fold(current,target,start,stop,cost)
         ref=coverage_reference(current,target,start,stop,cost)
+        if ref.get("stress")=="fee_borrow_adverse":
+            return ref
         # A ruin result is disqualified; exact trade count can differ because
         # the vectorized engine counts all precomputed entries before ruin.
         if metrics["status"]!="ruin_stress" and (
             ref["status"]!=metrics["status"] or ref["entries"]!=metrics["entries"] or any(
                 not math.isclose(ref[k],metrics[k],abs_tol=1e-9,rel_tol=1e-9) for k in ("net","drawdown"))):
             raise ValueError("coverage independent replay mismatch")
-        return metrics
-    metrics,path=foundry.execute(current,target,start,stop,spec["risk"],cost)
+        if metrics["status"]=="ruin_stress":
+            return {**metrics,"ruin":True}
+        # The independent replay computes recovery on the executable next-open path.
+        return {**metrics,**{k:v for k,v in ref.items() if k not in metrics}}
+    metrics,path=foundry.execute(current,target,start,stop,spec["risk"],cost,return_full_path=True)
     check_path(path,metrics)
-    return metrics
+    return {**metrics,**recovery_risk.measure(path,current.index[start:start+len(path)],current.index[start])}
 
 
 def evaluate(row,bars,market,dates,cutoffs):
@@ -396,14 +456,22 @@ def evaluate(row,bars,market,dates,cutoffs):
     train=fold(version,current,target,warm,boundary,spec,market.cost_bps)
     validm=fold(version,current,target,boundary,len(current),spec,market.cost_bps)
     reason=initial_gate(train,validm)
+    if not reason:
+        reason=recovery_risk.reason(train) or recovery_risk.reason(validm)
     # Three disjoint chronological reset folds, beginning after the native warmup.
     edges=np.linspace(warm,len(current),4,dtype=int)
-    folds=[fold(version,current,target,int(a),int(b),spec,market.cost_bps) for a,b in zip(edges[:-1],edges[1:])]
+    folds=[]
+    continuous=None
     if not reason:
-        if any(f["status"] in ("ruin","ruin_stress") or f["drawdown"]>DRAW_LIMIT for f in folds):
-            reason="chronological_fold_risk"
+        folds=[fold(version,current,target,int(a),int(b),spec,market.cost_bps) for a,b in zip(edges[:-1],edges[1:])]
+        if any(f["status"] in ("ruin","ruin_stress") or f.get("ruin") for f in folds):
+            reason="capital_ruin"
         elif sum(f["net"]>0 for f in folds)<2 or math.prod(1+f["net"] for f in folds)<=1 or sum(entries(f) or 0 for f in folds)<MIN_ENTRIES:
             reason="chronological_fold_robustness"
+    if not reason:
+        # Continuous replay prevents an artificial fold boundary hiding a long loss.
+        continuous=fold(version,current,target,warm,len(current),spec,market.cost_bps)
+        reason=recovery_risk.reason(continuous)
     receipt=json.loads(original["discovered"]).get("superlab_receipt")
     if os.getenv("GITHUB_ACTIONS")=="true" and not receipt:
         try:
@@ -413,7 +481,8 @@ def evaluate(row,bars,market,dates,cutoffs):
             raise Waiting("waiting_source","central research contract unavailable")
     if (receipt or {}).get("status")=="INVALID_EVIDENCE":
         raise ValueError("central research receipt invalid")
-    q={"discovery":train,"validation":validm,"folds":folds,"reason":reason,
+    q={"discovery":train,"validation":validm,"folds":folds,"continuous":continuous,"reason":reason,
+       "risk_policy":recovery_risk.VERSION,
        "current_snapshot":data.fingerprint(current),"from":str(current.index[0].date()),
        "asof":str(current.index[-1].date()),"bars":len(current),
        "arithmetic_audit":"independent_open_replay" if version==coverage.VERSION else "native_return_path_compounding",
@@ -425,11 +494,11 @@ def evaluate(row,bars,market,dates,cutoffs):
 def adapter_hash():
     # A different signal/price/execution implementation cannot extend a frozen experiment.
     h=hashlib.sha256()
-    for module in (coverage,foundry,combo,indicator,indicator_bank,research,surface,data,events):
+    for module in (coverage,foundry,combo,indicator,indicator_bank,research,surface,data,events,recovery_risk):
         h.update(Path(module.__file__).read_bytes())
     for fn in (prepare,fold,coverage_reference,forward_window,complete_event_hash,advance):
         h.update(inspect.getsource(fn).encode())
-    h.update(canonical({"version":VERSION,"forward_bars":FORWARD_BARS,"risk":DRAW_LIMIT,"entries":MIN_ENTRIES}).encode())
+    h.update(canonical({"version":VERSION,"forward_bars":FORWARD_BARS,"risk":recovery_risk.VERSION,"max_recovery_days":recovery_risk.MAX_RECOVERY_DAYS,"entries":MIN_ENTRIES}).encode())
     return h.hexdigest()
 
 
@@ -452,18 +521,10 @@ def update(db,row,status,reason,now,qual=None,forward=None):
 def admit(db,row,bars,market,dates,cutoffs,now):
     if row["source"]!=market.source:
         raise Waiting("waiting_source","exact original venue/provider unavailable")
-    active=db.execute("SELECT count(*) FROM native_paper_candidates WHERE status=? AND asset LIKE ?",(ACTIVE,market.name+":%")).fetchone()[0]
-    same=db.execute("SELECT count(*) FROM native_paper_candidates WHERE status=? AND asset=?",(ACTIVE,row["asset"])).fetchone()[0]
-    full=active>=CAPACITY[market.name] or same>=PER_ASSET_ACTIVE
-    if full and row["status"]=="qualified_waiting_capacity":
-        return "capacity_unchanged"
     spec,current,q,names=evaluate(row,bars,market,dates,cutoffs)
     if q["reason"]:
         update(db,row,"recheck_rejected",q["reason"],now,q)
         return "recheck_rejected"
-    if full:
-        update(db,row,"qualified_waiting_capacity","native market/asset concurrency limit",now,q)
-        return "qualified_waiting_capacity"
     through=str(current.index[-1].date())
     state={"version":VERSION,"adapter_sha256":adapter_hash(),"registered_utc":now.isoformat(),
            "registered_date":now.date().isoformat(),"frame":spec["frame"],"direction":spec["direction"],
@@ -471,7 +532,7 @@ def admit(db,row,bars,market,dates,cutoffs,now):
            "data_sha256":data.fingerprint(bars),"event_through":through,
            "event_sha256":complete_event_hash(names,dates,through),"source":market.source,
            "cost_bps":market.cost_bps,"observed_bars":0,"target_bars":FORWARD_BARS,
-           "short_borrow_assumed":spec["direction"]!="long","conditional_only":True,
+           "short_borrow_assumed":spec["direction"]!="long","conditional_only":True,"risk_policy":recovery_risk.VERSION,
            "paper_approved":False,"live_allowed":False}
     update(db,row,ACTIVE,None,now,q,state)
     return ACTIVE
@@ -480,7 +541,7 @@ def admit(db,row,bars,market,dates,cutoffs,now):
 def advance(db,row,bars,market,dates,cutoffs,now):
     state=json.loads(row["forward"]);original=json.loads(row["record"])
     spec=verify_record(original);version=row["version"]
-    if state["adapter_sha256"]!=adapter_hash() or state["source"]!=market.source or state["cost_bps"]!=market.cost_bps:
+    if state["adapter_sha256"] not in (adapter_hash(),LEGACY_ADAPTER_HASH) or state["source"]!=market.source or state["cost_bps"]!=market.cost_bps:
         raise ValueError("frozen native executor/source/cost changed")
     base=bars.loc[state["data_start"]:]
     previous=base.loc[:state["data_through"]]
@@ -514,41 +575,47 @@ def advance(db,row,bars,market,dates,cutoffs,now):
         state.update(metrics=metrics,first_observed=str(current.index[first].date()),
                      observed_through=str(current.index[stop-1].date()),
                      provisional=observed<FORWARD_BARS)
-        if observed==FORWARD_BARS:
-            passed=metrics["status"]=="evaluated" and metrics["net"]>0 and metrics["drawdown"]<=DRAW_LIMIT and (entries(metrics) or 0)>=MIN_ENTRIES
+        risk_reason=recovery_risk.reason(metrics)
+        if risk_reason in ("capital_ruin","recovery_time_exceeded") or observed==FORWARD_BARS:
+            passed=observed==FORWARD_BARS and metrics["status"]=="evaluated" and metrics["net"]>0 and risk_reason is None and (entries(metrics) or 0)>=MIN_ENTRIES
             status="conditional_completed_positive" if passed else "conditional_completed_failed"
             state["conditional_gate_pass"]=passed
             state["forward_validation_complete"]=True
-    update(db,row,status,None,now,forward=state)
+            state["risk_decision"]=risk_reason
+    state["adapter_sha256"]=adapter_hash()
+    state["risk_policy"]=recovery_risk.VERSION
+    update(db,row,status,state.get("risk_decision"),now,forward=state)
     return status
 
 
 def priority_assets(db,market,today):
+    """One data fetch per asset, not one per strategy. New and due work is fair."""
     active=[r[0].split(":",1)[1] for r in db.execute("""SELECT asset FROM native_paper_candidates
-       WHERE status=? AND asset LIKE ? GROUP BY asset ORDER BY min(coalesce(checked,'')),asset""",(ACTIVE,market+":%"))]
-    candidates=[r[0].split(":",1)[1] for r in db.execute("""SELECT asset FROM native_paper_candidates c
-       WHERE status IN ('queued','waiting_source','waiting_calendar','waiting_history','qualified_waiting_capacity')
+       WHERE status=? AND asset LIKE ? AND (checked IS NULL OR substr(checked,1,10)<?)
+       GROUP BY asset ORDER BY min(coalesce(checked,'')),asset""",(ACTIVE,market+":%",today.isoformat()))]
+    candidates=[r[0].split(":",1)[1] for r in db.execute("""SELECT asset FROM native_paper_candidates
+       WHERE status IN ('queued','waiting_source','waiting_calendar','waiting_history','qualified_waiting_capacity','policy_recheck')
          AND asset LIKE ? AND (checked IS NULL OR substr(checked,1,10)<?)
-         AND (status<>'qualified_waiting_capacity' OR (
-             (SELECT count(*) FROM native_paper_candidates x WHERE x.asset=c.asset AND x.status='conditional_active')<?
-             AND (SELECT count(*) FROM native_paper_candidates x WHERE x.asset LIKE ? AND x.status='conditional_active')<?))
-         AND NOT EXISTS(SELECT 1 FROM asset_rotation a WHERE a.market=? AND a.symbol=substr(c.asset,instr(c.asset,':')+1) AND a.due>?)
-        GROUP BY asset ORDER BY min(coalesce(checked,'')),min(asof),asset LIMIT ?""",
-       (market+":%",today.isoformat(),PER_ASSET_ACTIVE,market+":%",CAPACITY[market],
-        market,today.isoformat(),PRIORITY_ASSETS))]
+       GROUP BY asset ORDER BY min(coalesce(checked,'')),min(asof),asset""",
+       (market+":%",today.isoformat()))]
     return active,candidates
 
 
-def run(db,aligned_panel,aligned_markets,dates,cutoffs,now,seconds=105):
-    """Update active native PAPER first, then fairly recheck queued hypotheses."""
+def run(db,aligned_panel,aligned_markets,dates,cutoffs,now,seconds=BACKLOG_SECONDS):
+    """Unlimited admissions, bounded wall-clock work with durable fair continuation."""
     deadline=time.monotonic()+seconds
     counts={};checked=0
     active=list(db.execute("SELECT * FROM native_paper_candidates WHERE status=? ORDER BY checked,asset,id",(ACTIVE,)))
+    # Reserve half the lane for unscreened work so a large observation registry
+    # cannot prevent additional admissions. Remaining time is shared below.
+    active_deadline=time.monotonic()+seconds/2
     for row in active:
-        if time.monotonic()>=deadline:
+        if time.monotonic()>=active_deadline:
             break
         asset=row["asset"]
         if asset not in aligned_panel:
+            continue
+        if row["checked"] and row["checked"][:10]>=now.date().isoformat() and not row["reason"]:
             continue
         db.execute("SAVEPOINT native_forward")
         try:
@@ -559,10 +626,22 @@ def run(db,aligned_panel,aligned_markets,dates,cutoffs,now,seconds=105):
             status="forward_waiting"
         except (ValueError,KeyError,TypeError,IndexError,ArithmeticError) as exc:
             db.execute("ROLLBACK TO native_forward")
-            # The first mismatch might be temporary. An identical repeated
-            # integrity failure releases its slot, without touching old evidence.
             reason=str(exc)[:220]
-            if row["reason"]==reason:
+            state=json.loads(row["forward"] or "{}")
+            if state.get("observed_bars",0)==0 and "frozen native PAPER price prefix" in reason:
+                # A zero-observation series can be restarted with fresh data, but
+                # its prior registration is retained and never backdated.
+                db.execute("INSERT OR IGNORE INTO native_paper_restarts VALUES (?,?,?,?,?,?)",
+                    (row["version"],row["asset"],row["id"],now.isoformat(),canonical(dict(row)),reason))
+                try:
+                    status=admit(db,row,aligned_panel[asset],aligned_markets[asset],dates,cutoffs,now)
+                except Waiting as exc2:
+                    update(db,row,exc2.status,str(exc2),now)
+                    status=exc2.status
+                except (ValueError,KeyError,TypeError,IndexError,ArithmeticError) as exc2:
+                    update(db,row,"invalid_evidence",str(exc2)[:220],now)
+                    status="invalid_evidence"
+            elif row["reason"]==reason:
                 update(db,row,"conditional_paused",reason,now)
                 status="conditional_paused"
             else:
@@ -571,24 +650,16 @@ def run(db,aligned_panel,aligned_markets,dates,cutoffs,now,seconds=105):
         finally:
             db.execute("RELEASE native_forward")
         counts[status]=counts.get(status,0)+1
-    # Oldest never-screened first, with a round-robin over available assets.
     candidates={}
     for row in db.execute("""SELECT * FROM native_paper_candidates
-        WHERE status IN ('queued','waiting_source','waiting_calendar','waiting_history','qualified_waiting_capacity')
-          AND (checked IS NULL OR substr(checked,1,10)<?)
+        WHERE status IN ('queued','waiting_source','waiting_calendar','waiting_history','qualified_waiting_capacity','policy_recheck')
+          AND (checked IS NULL OR substr(checked,1,10)<? OR status='qualified_waiting_capacity')
         ORDER BY coalesce(checked,''),asof,version,id""",(now.date().isoformat(),)):
         if row["asset"] in aligned_panel:
-            if row["status"]=="qualified_waiting_capacity":
-                market=aligned_markets[row["asset"]]
-                same=db.execute("SELECT count(*) FROM native_paper_candidates WHERE status=? AND asset=?",(ACTIVE,row["asset"])).fetchone()[0]
-                total=db.execute("SELECT count(*) FROM native_paper_candidates WHERE status=? AND asset LIKE ?",(ACTIVE,market.name+":%")).fetchone()[0]
-                if same>=PER_ASSET_ACTIVE or total>=CAPACITY[market.name]:
-                    continue
             candidates.setdefault(row["asset"],[]).append(row)
-    # No unlimited repeat on qualified, already active assets.
-    while candidates and time.monotonic()<deadline and checked<MAX_SCREEN_PER_RUN:
+    while candidates and time.monotonic()<deadline:
         for asset,rows in list(candidates.items()):
-            if time.monotonic()>=deadline or checked>=MAX_SCREEN_PER_RUN:
+            if time.monotonic()>=deadline:
                 break
             row=rows.pop(0)
             if not rows:
@@ -607,10 +678,8 @@ def run(db,aligned_panel,aligned_markets,dates,cutoffs,now,seconds=105):
             finally:
                 db.execute("RELEASE native_candidate")
             counts[status]=counts.get(status,0)+1
-            if status!="capacity_unchanged":
-                checked+=1
+            checked+=1
     return {"outcomes":counts,"checked_this_run":checked,"runtime_bound_seconds":seconds}
-
 
 def observe_unavailable(db,asset,error,now):
     db.execute("""UPDATE native_paper_candidates SET reason=?,checked=?
@@ -629,12 +698,14 @@ def summary(db):
     rows=[]
     for r in db.execute("""SELECT * FROM native_paper_candidates
         WHERE status LIKE 'conditional_%' OR status='qualified_waiting_capacity'
-        ORDER BY CASE status WHEN 'conditional_active' THEN 0 ELSE 1 END,checked DESC,asset,id LIMIT 300"""):
+        ORDER BY CASE status WHEN 'conditional_active' THEN 0 ELSE 1 END,checked DESC,asset,id"""):
         q=json.loads(r["qualification"] or "{}");f=json.loads(r["forward"] or "{}")
         spec=json.loads(json.loads(r["record"])["spec"]) if r["record"] else {}
         rows.append({"asset":r["asset"],"engine":r["version"],"id":r["id"],"frame":spec.get("frame"),
              "direction":spec.get("direction"),"status":r["status"],"reason":r["reason"],
              "historical_net":q.get("validation",{}).get("net"),"historical_drawdown":q.get("validation",{}).get("drawdown"),
+             "historical_recovery_days":(q.get("continuous") or {}).get("max_recovery_days"),
+             "forward_recovery_days":f.get("metrics",{}).get("max_recovery_days"),
              "registered":f.get("registered_date"),"observed_bars":f.get("observed_bars"),
              "target_bars":f.get("target_bars"),"forward_net":f.get("metrics",{}).get("net"),
              "forward_drawdown":f.get("metrics",{}).get("drawdown"),"provisional":f.get("provisional"),
@@ -649,5 +720,8 @@ def summary(db):
                           "validation_net":evidence["validation"].get("net"),
                           "validation_drawdown":evidence["validation"].get("drawdown")})
     return {"version":VERSION,"total":sum(counts.values()),"counts":counts,"by_engine":by_engine,
-            "reasons":reasons,"records":rows,"decisions":decisions,"capacity":CAPACITY,"forward_target_bars":FORWARD_BARS,
+            "reasons":reasons,"records":rows,"decisions":decisions,
+            "policy_migrations":db.execute("SELECT count(*) FROM native_paper_policy_migration").fetchone()[0],
+            "zero_bar_restarts":db.execute("SELECT count(*) FROM native_paper_restarts").fetchone()[0],"capacity":None,"unlimited_conditional_capacity":True,"risk_policy":recovery_risk.VERSION,
+            "max_recovery_days":recovery_risk.MAX_RECOVERY_DAYS,"forward_target_bars":FORWARD_BARS,
             "live_allowed":False,"central_accept":False,"paper_approved":False}

@@ -111,9 +111,9 @@ class NativePaperTests(unittest.TestCase):
             seed(db,foundry.VERSION,FOUNDRY,"CRYPTO:ETH-USD",override=lambda d,v:v["metrics"].update(entries=1))
             native.harvest(db)
             result=native.summary(db)
-            self.assertEqual(result["counts"],{"screen_rejected":2})
+            self.assertEqual(result["counts"],{"queued":1,"screen_rejected":1})
             self.assertEqual({r["reason"] for r in result["reasons"]},
-                             {"historical_drawdown_limit","insufficient_trade_evidence"})
+                             {"insufficient_trade_evidence"})
             self.assertEqual(native.harvest(db),0)
 
     def test_archive_positive_is_restored_by_original_hash_without_repeating_attempt(self):
@@ -194,17 +194,58 @@ class NativePaperTests(unittest.TestCase):
             native.prepare(coverage.VERSION,spec,frame(),M,{}, {})
         self.assertEqual(ctx.exception.status,"waiting_calendar")
 
-    def test_capacity_keeps_qualified_candidate_and_no_repeated_recheck(self):
+    def test_unlimited_candidates_for_same_asset_and_no_repeat(self):
         b=frame();now=now_for(b);a="CRYPTO:BTC-USD"
-        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}),patch.object(native,"PER_ASSET_ACTIVE",1):
-            seed(db,coverage.VERSION,COVERAGE);seed(db,foundry.VERSION,FOUNDRY)
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
+            for version,spec in SPECS.items():
+                seed(db,version,spec,a,b)
             native.harvest(db)
             r=native.run(db,{a:b},{a:M},{},{},now)
-            self.assertEqual(r["outcomes"],{"conditional_active":1,"qualified_waiting_capacity":1})
+            self.assertEqual(r["outcomes"],{"conditional_active":4},r)
             with patch.object(native,"evaluate",side_effect=AssertionError("repeated recheck")):
                 r=native.run(db,{a:b},{a:M},{},{},now+timedelta(days=1))
             self.assertEqual(r["checked_this_run"],0)
-            self.assertEqual(native.summary(db)["counts"].get("qualified_waiting_capacity"),1)
+            self.assertEqual(native.summary(db)["counts"].get("conditional_active"),4)
+
+    def test_v1_drawdown_and_capacity_decisions_reopened_once(self):
+        b=frame();now=now_for(b);a="CRYPTO:BTC-USD"
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
+            seed(db,coverage.VERSION,COVERAGE,a,b)
+            seed(db,foundry.VERSION,FOUNDRY,a,b)
+            native.harvest(db)
+            db.execute("UPDATE native_paper_candidates SET status='screen_rejected',reason='historical_drawdown_limit',record=NULL WHERE version=?",(coverage.VERSION,))
+            db.execute("UPDATE native_paper_candidates SET status='qualified_waiting_capacity' WHERE version=?",(foundry.VERSION,))
+            self.assertEqual(native.migrate_policy(db,now),2)
+            self.assertEqual(native.migrate_policy(db,now),0)
+            self.assertEqual(db.execute("SELECT count(*) FROM attempts").fetchone()[0],2)
+            self.assertEqual(db.execute("SELECT count(*) FROM native_paper_policy_migration").fetchone()[0],2)
+            r=native.run(db,{a:b},{a:M},{},{},now)
+            self.assertEqual(r["outcomes"],{"conditional_active":2},r)
+
+    def test_zero_bar_revision_requalifies_without_backdating(self):
+        b=frame();now=now_for(b);a="CRYPTO:BTC-USD"
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
+            seed(db,coverage.VERSION,COVERAGE,a,b);native.harvest(db)
+            native.run(db,{a:b},{a:M},{},{},now)
+            changed=frame(1601);changed.loc[changed.index[50],"close"]*=1.001
+            newer=now_for(changed)
+            r=native.run(db,{a:changed},{a:M},{},{},newer)
+            self.assertEqual(r["outcomes"],{"conditional_active":1},r)
+            f=json.loads(db.execute("SELECT forward FROM native_paper_candidates").fetchone()[0])
+            self.assertEqual(f["registered_date"],newer.date().isoformat())
+            self.assertEqual(f["observed_bars"],0)
+            self.assertEqual(db.execute("SELECT count(*) FROM native_paper_restarts").fetchone()[0],1)
+
+    def test_data_only_backlog_fetches_unselected_asset_once_for_all_strategies(self):
+        b=frame();now=now_for(b);a="CRYPTO:ETH-USD"
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
+            seed(db,coverage.VERSION,COVERAGE,a,b);seed(db,foundry.VERSION,FOUNDRY,a,b)
+            native.harvest(db)
+            with patch.object(engine,"fetch_bars",return_value=(b,None)) as fetch:
+                result=engine.process_native_backlog(db,["CRYPTO"],{}, {},{}, {},now,seconds=30)
+            self.assertEqual(fetch.call_count,1)
+            self.assertEqual(result["data_only_fetched"],1)
+            self.assertEqual(result["outcomes"],{"conditional_active":2})
 
     def test_actual_autonomous_cycle_admits_native_candidate(self):
         b=frame()
