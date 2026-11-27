@@ -30,6 +30,8 @@ def number(value):
 
 
 def status(item):
+    if item["status"]=="paused_integrity":
+        return "Veri bütünlüğü nedeniyle durduruldu"
     if item["data_paused"]:
         return "Veri kontrolü bekliyor"
     if item["status"] == "active" and not item["progress"] and not item["cursor"]:
@@ -38,6 +40,7 @@ def status(item):
         "active": "PAPER izleniyor",
         "verified_paper": "PAPER doğrulandı",
         "revised_before_start": "Başlangıç öncesi fiyat geçmişi değişti",
+        "paused_integrity": "Veri bütünlüğü nedeniyle durduruldu",
         "paper_gate_failed": "PAPER eşiği geçilemedi",
     }.get(item["status"], item["status"])
 
@@ -181,6 +184,24 @@ def render_panel(payload):
         else:
             st.success(f"Son yayımlanan turda {research['new_trials']} teknik ve "
                        f"{research['new_event_trials']} olay denemesi kaydedildi.")
+        admission=research.get("paper_admission")
+        if admission:
+            with st.expander("PAPER aday kuyruğu ve kabul nedenleri",expanded=True):
+                counts=admission.get("candidate_counts",{})
+                c=st.columns(4)
+                c[0].metric("PAPER adayları",admission.get("total_candidates",0))
+                c[1].metric("Sırada",counts.get("waiting",0))
+                c[2].metric("İzlemeye kabul",counts.get("admitted",0))
+                c[3].metric("Veri nedeniyle durdurulan",admission.get("paused_integrity",0))
+                st.caption("Pozitif tarihsel adaylar gelecekteki PAPER başlangıcından önce yeniden doğrulanır. "
+                           "Durdurulmuş kayıtlar silinmez; geçmiş performans geriye doğru doldurulmaz.")
+                st.dataframe([{"Piyasa":name,"Aktif":admission.get("active_by_market",{}).get(name,0),"Kapasite":cap}
+                              for name,cap in admission.get("capacity_by_market",{}).items()],hide_index=True)
+                if admission.get("candidates"):
+                    st.dataframe(admission["candidates"],hide_index=True)
+                if admission.get("historical_positive_by_engine"):
+                    st.caption("Diğer motorlar: keşif ve tarihsel doğrulama neti pozitif olan denemeler. PAPER onayı değildir.")
+                    st.dataframe(admission["historical_positive_by_engine"],hide_index=True)
         if research.get("markets"):
             with st.expander("Varlık evreni ve doğrulanan geçmiş", expanded=True):
                 coverage=research.get("history_summary",{})
@@ -281,9 +302,11 @@ def render_panel(payload):
     if not entries:
         st.info("Henüz PAPER izlemeye alınmış strateji yok.")
         return
-    filter_value = st.radio("Göster", ["Aktif", "Tümü", "Tamamlanan"], horizontal=True)
-    subset = [item for item in entries if
-              filter_value == "Tümü" or (item["status"] == "active") == (filter_value == "Aktif")]
+    filter_value = st.radio("Göster", ["Aktif", "Tümü", "Tamamlanan", "Veri nedeniyle durdurulan"], horizontal=True)
+    subset = [item for item in entries if filter_value=="Tümü" or
+              (filter_value=="Aktif" and item["status"]=="active") or
+              (filter_value=="Tamamlanan" and item["status"] in ("verified_paper","paper_gate_failed")) or
+              (filter_value=="Veri nedeniyle durdurulan" and item["status"]=="paused_integrity")]
     if not subset:
         st.info("Bu görünümde strateji yok.")
         return

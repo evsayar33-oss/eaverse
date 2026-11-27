@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import cohort, combination_focus, combination_research, coverage, cross_asset_research, data, events, foundry, history_sources, indicator_research, model_research, paper_archive, qualification, reference, research, universe
+from . import cohort, combination_focus, combination_research, coverage, cross_asset_research, data, events, foundry, history_sources, indicator_research, model_research, paper_admission, paper_archive, qualification, reference, research, universe
 
 
 SCHEMA = """
@@ -90,6 +90,7 @@ def connect(path):
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    db.executescript(paper_admission.SCHEMA)
     return db
 
 
@@ -132,6 +133,14 @@ def recheck_pending(db, asset, market, bars, now):
     if data.fingerprint(window) == row["digest"]:
         return
     origin = json.loads(row["origin"])
+    if origin.get("replaces"):
+        # A replacement is allowed once, not forever. Preserve both the
+        # original and replacement records and release this unusable slot.
+        evidence={"reason":"repeated_origin_revision_before_first_observation",
+                  "checked_at":now.isoformat(),"forward_validation_complete":False}
+        db.execute("UPDATE paper SET status='paused_integrity',result=? WHERE sequence=?",
+                   (research.canonical(evidence),row["sequence"]))
+        return
     history = bars.loc[:row["cutoff"]]
     if len(history) < 600 or date(history.index[-1]) != row["cutoff"]:
         return
@@ -166,10 +175,12 @@ def recheck_pending(db, asset, market, bars, now):
         origin.update(revised, replaces=row["sequence"], data_start=date(history.index[0]),
                       data_sha256=data.fingerprint(history), code=os.getenv("GITHUB_SHA", "local"),
                       recovery=evidence)
-        db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
+        inserted=db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
                       VALUES(?,?,?,?,?,?,?,?,?,?,'active')""",
                    (asset,row["spec"],row["cost"],start,date(anchor.index[0]),row["cutoff"],
                     data.fingerprint(anchor),row["version"],row["policy"],research.canonical(origin)))
+        frozen=db.execute("SELECT * FROM paper WHERE sequence=?",(inserted.lastrowid,)).fetchone()
+        paper_archive.capture(db,frozen,anchor)
 
 
 def extend_active_history(db, asset, bars, market):
@@ -335,28 +346,8 @@ def discover(db, asset, market, bars, now, budget):
         db.execute("UPDATE attempts SET validated=? WHERE version=? AND asset=? AND id=?",
                    (research.canonical(validation), research.VERSION, asset, key))
         nominee = {"id": key, "spec": spec, "validation": validation}
-        active_count = db.execute("SELECT count(*) FROM paper WHERE status='active'").fetchone()[0]
-        if market.source in ("coinbase","yahoo") and validation["pass"] and validation["execution_audit"]["status"] != "mismatch" and active_count < 12:
-            start = (now.date() + timedelta(days=1)).isoformat()
-            if market.calendar:
-                import exchange_calendars as xcals
-                start = date(xcals.get_calendar(market.calendar).date_to_session(start, direction="next"))
-            anchored = bars.iloc[-400:]
-            origin = {"id": key, "source": market.source, "data_sha256": snapshot, "code": code,
-                      "periods": periods, "calendar": market.calendar,
-                      "data_start": date(bars.index[0]), "data_end": asof,
-                      "history_cost_bps": 2 * market.cost_bps,
-                      "discovery": discovery_report, "validation": validation}
-            inserted = db.execute(
-                """INSERT OR IGNORE INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,'active')""",
-                (asset, research.canonical(spec), market.cost_bps, start, date(anchored.index[0]), asof,
-                 data.fingerprint(anchored), research.VERSION, research.canonical(research.POLICY),
-                 research.canonical(origin)),
-            )
-            if inserted.rowcount:
-                frozen=db.execute("SELECT * FROM paper WHERE sequence=?", (inserted.lastrowid,)).fetchone()
-                paper_archive.capture(db, frozen, anchored)
+        # PAPER nominations are durably persisted from attempts after the
+        # central evidence review. Capacity must not silently discard a win.
     return {"new_trials": len(selected), "total_trials": len(records) + len(selected), "candidate": nominee,
             "snapshot_sha256": snapshot, "from": date(bars.index[0]), "asof": asof,
             "paper_eligible": market.source in ("coinbase","yahoo"),
@@ -382,6 +373,17 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     first_event = db.execute('SELECT coalesce(max(rowid),0) FROM event_trials').fetchone()[0]
     with db:
         update_pending_paper_policy(db, now)
+        recovered_nominations=paper_admission.seed(db)
+        archive_recovery={"status":"not_requested","added":0}
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            db.execute("SAVEPOINT candidate_archive")
+            try:
+                archive_recovery=paper_admission.recover_one_archive(db)
+            except Exception as exc:
+                db.execute("ROLLBACK TO candidate_archive")
+                archive_recovery={"status":"error","error":str(exc)[:200],"added":0}
+            finally:
+                db.execute("RELEASE candidate_archive")
         if os.getenv("GITHUB_ACTIONS") == "true":
             from . import ideas
             ideas.refresh(db)
@@ -405,6 +407,16 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             stale_listing = listing_asof is None or listing_asof < (now.date() - timedelta(days=3)).isoformat()
             health(db, f"listings:{market.name}", "live listing catalog unavailable or stale" if stale_listing else None)
             selected = universe.queue(db, market, symbols, now.date(), asset_limit or universe.LIMITS[market.name])
+            priority=paper_admission.priority_assets(db,market.name,now.date())
+            active_symbols={r[0].split(":",1)[1] for r in db.execute(
+                "SELECT asset FROM paper WHERE status='active' AND asset LIKE ?",(market.name+":%",))}
+            # Do not grow the normal scan budget. Queue old qualified ideas
+            # ahead of fresh rotation, with a bounded number per market.
+            priority=[symbol for symbol in priority if symbol in symbols and symbol not in active_symbols]
+            if priority:
+                active_first=[s for s in selected if s in active_symbols]
+                broad=[s for s in selected if s not in active_symbols and s not in priority]
+                selected=(active_first+priority+broad)[:max(asset_limit or universe.LIMITS[market.name],len(active_first))]
             for symbol in reversed(cohort.active_assets(db, market)):
                 if symbol not in selected:
                     # At most one extra research asset, never displace existing PAPER.
@@ -440,6 +452,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
               "event_sources": event_coverage}
     daily_records = []
     aligned_panel = {}
+    aligned_markets = {}
     # Interleave providers and give active PAPER rows the first slots on their market.
     scheduled = []
     while queues:
@@ -492,6 +505,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 focus_data=(market,bars,failure)
             if failure is None:
                 aligned_panel[asset] = bars
+                aligned_markets[asset] = market
                 try:
                     with db:
                         paper, paper_error = None, None
@@ -509,6 +523,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                         finally:
                             db.execute("RELEASE paper_update")
                         if paper_error:
+                            paper_admission.pause_integrity(db,asset,paper_error,now)
                             db.execute("INSERT OR REPLACE INTO paper_data_issues VALUES (?,?)", (asset, paper_error))
                         else:
                             db.execute("DELETE FROM paper_data_issues WHERE asset=?", (asset,))
@@ -630,6 +645,33 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
         events.write_daily(daily_report, daily_records)
     with db:
         report["superlab_qualification"] = qualification.review_new(db, first_technical, first_event)
+        new_nominations=paper_admission.seed(db)
+        admissions=[]
+        counts={}
+        admission_deadline=time.monotonic()+45
+        queue=db.execute("""SELECT asset,min(nominated_asof) AS first
+            FROM paper_candidates WHERE status='waiting' GROUP BY asset ORDER BY first,asset""").fetchall()
+        for item in queue:
+            asset=item["asset"]
+            if asset not in aligned_panel or time.monotonic()>admission_deadline:
+                continue
+            market=aligned_markets[asset]
+            if counts.get(market.name,0)>=paper_admission.ADMISSIONS_PER_MARKET_PER_RUN:
+                continue
+            db.execute("SAVEPOINT paper_admission")
+            try:
+                outcome=paper_admission.admit(db,asset,market,aligned_panel[asset],now)
+                if outcome:
+                    counts[market.name]=counts.get(market.name,0)+1
+                    admissions.append({"asset":asset,**outcome})
+            except (ValueError,KeyError,TypeError) as exc:
+                db.execute("ROLLBACK TO paper_admission")
+                counts[market.name]=counts.get(market.name,0)+1
+                admissions.append({"asset":asset,"status":"recheck_error","reason":str(exc)[:200]})
+            finally:
+                db.execute("RELEASE paper_admission")
+        report["paper_admission"]={**paper_admission.summary(db),"recovered_nominations":recovered_nominations,
+                                   "new_nominations":new_nominations,"archive_recovery":archive_recovery,"this_run":admissions}
     report["new_coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (coverage.VERSION, first_technical)).fetchone()[0]
     report["new_combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (combination_research.VERSION, first_technical)).fetchone()[0]
     report["combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (combination_research.VERSION,)).fetchone()[0]
