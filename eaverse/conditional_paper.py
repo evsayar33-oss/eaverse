@@ -39,6 +39,10 @@ PER_ASSET_ACTIVE = 3
 PRIORITY_ASSETS = 6
 MAX_SCREEN_PER_RUN = 192
 MAX_ARCHIVES_PER_RUN = 6
+# Legacy archive batches were larger than the current 16 MiB writer target.
+# Match the established durable-checkpoint expansion envelope; stream one row at a time.
+MAX_ARCHIVE_EXPANDED = 768 * 1024 * 1024
+MAX_ARCHIVE_LINE = 8 * 1024 * 1024
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS native_paper_candidates(
  version TEXT NOT NULL, asset TEXT NOT NULL, id TEXT NOT NULL, source TEXT NOT NULL,
@@ -177,10 +181,13 @@ def restore_archive(db,path,sha,expected,now):
         raise ValueError("native archive checksum mismatch")
     seen=set();size=restored=0
     with gzip.open(path,"rt",encoding="utf-8") as stream:
-        for line in stream:
-            size+=len(line.encode())
-            if size>64*1024*1024:
-                raise ValueError("native archive expanded size cap")
+        while line:=stream.readline(MAX_ARCHIVE_LINE+1):
+            row_bytes=len(line.encode())
+            if row_bytes>MAX_ARCHIVE_LINE:
+                raise ValueError("native archive record exceeds line bound")
+            size+=row_bytes
+            if size>MAX_ARCHIVE_EXPANDED:
+                raise ValueError("native archive exceeds checkpoint expansion bound")
             item=json.loads(line);row=item["row"];kind=item["type"]
             key=(kind,row["version"],row["asset"],row["id"])
             if kind not in ("technical","event") or key in seen or len(seen)>=expected:
@@ -223,7 +230,8 @@ def recover_archives(db,now):
         FROM native_paper_candidates c JOIN history_archives h ON h.sha=c.archive
         LEFT JOIN native_paper_archive_attempts a ON a.sha=h.sha
         WHERE c.status='awaiting_archive'
-          AND (a.checked IS NULL OR substr(a.checked,1,10)<?)
+          AND (a.checked IS NULL OR substr(a.checked,1,10)<?
+               OR (a.status='pending' AND a.error='native archive expanded size cap'))
         GROUP BY h.sha,h.url,h.records ORDER BY min(coalesce(a.checked,'')),pending DESC,h.sha LIMIT ?""",
         (now.date().isoformat(),MAX_ARCHIVES_PER_RUN))]
     if not rows:
