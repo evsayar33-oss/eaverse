@@ -247,6 +247,44 @@ class NativePaperTests(unittest.TestCase):
             self.assertEqual(result["data_only_fetched"],1)
             self.assertEqual(result["outcomes"],{"conditional_active":2})
 
+    def test_cross_market_data_lane_preserves_each_provider(self):
+        b=frame();now=now_for(b)
+        assets=["CRYPTO:BTC-USD","US:SPY","BIST:THYAO.IS"]
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
+            for a in assets:
+                seed(db,coverage.VERSION,COVERAGE,a,b)
+                if not a.startswith("CRYPTO:"):
+                    db.execute("UPDATE attempts SET source='yahoo' WHERE asset=?",(a,))
+            native.harvest(db)
+            seen=[]
+            def fetch(market,symbol,now):
+                seen.append((market.name,symbol,market.source));return b,None
+            with patch.object(engine,"fetch_bars",side_effect=fetch):
+                result=engine.process_native_backlog(db,["CRYPTO","US","BIST"],{}, {},{}, {},now,seconds=30)
+            self.assertCountEqual(seen,[("CRYPTO","BTC-USD","coinbase"),("US","SPY","yahoo"),("BIST","THYAO.IS","yahoo")])
+            self.assertEqual(result["data_only_fetched"],3)
+            self.assertEqual(result["outcomes"],{"conditional_active":3},result)
+
+    def test_legacy_handoff_executes_without_regular_market_or_asset_quota(self):
+        from eaverse import paper_admission
+        b=frame();now=now_for(b);a="CRYPTO:BTC-USD"
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):
+            for n in (5,6,7,8):
+                spec={"rules":[["sma",n]],"vote":1,"sizing":"full","confirmation":1}
+                d={"pass":True,"net":.15};v={"pass":True,"net":.04,"execution_audit":{"status":"matched"}}
+                db.execute("INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (research.VERSION,a,research.digest(spec),"sma",research.canonical(spec),M.source,
+                   data.fingerprint(b),str(b.index[-1].date()),"test",research.canonical(research.LEGACY_POLICY),
+                   research.canonical(d),research.canonical(v)))
+            self.assertEqual(paper_admission.seed(db),4)
+            self.assertEqual(native.harvest_legacy(db,now),4)
+            self.assertEqual(native.harvest_legacy(db,now),0)
+            self.assertEqual(db.execute("SELECT count(*) FROM paper_candidates WHERE status='waiting'").fetchone()[0],0)
+            result=native.run(db,{a:b},{a:M},{},{},now,seconds=30)
+            self.assertEqual(result["outcomes"],{"conditional_active":4},result)
+            self.assertEqual(native.summary(db)["counts"],{"conditional_active":4})
+            self.assertEqual(db.execute("SELECT count(*) FROM paper").fetchone()[0],0)
+
     def test_actual_autonomous_cycle_admits_native_candidate(self):
         b=frame()
         with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}):

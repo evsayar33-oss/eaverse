@@ -382,7 +382,9 @@ def process_native_backlog(db,market_names,aligned_panel,aligned_markets,dates,c
             for symbol in (a,b):
                 if symbol and symbol not in ordered:
                     ordered.append(symbol)
-        queues.append(iter((market,symbol) for symbol in ordered if f"{name}:{symbol}" not in aligned_panel))
+        # Materialize while this market/name is bound. A deferred generator
+        # would capture the final market and send other symbols to its provider.
+        queues.append(iter([(market,symbol) for symbol in ordered if f"{name}:{symbol}" not in aligned_panel]))
     scheduled=[]
     while queues:
         remaining=[]
@@ -720,6 +722,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                 admissions.append({"asset":asset,"status":"recheck_error","reason":str(exc)[:200]})
             finally:
                 db.execute("RELEASE paper_admission")
+        legacy_handoff=conditional_paper.harvest_legacy(db,now)
         report["paper_admission"]={**paper_admission.summary(db),"recovered_nominations":recovered_nominations,
                                    "new_nominations":new_nominations,"archive_recovery":archive_recovery,"this_run":admissions}
         native_new=conditional_paper.harvest(db)
@@ -741,7 +744,7 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
         finally:
             db.execute("RELEASE conditional_native_cycle")
         report["conditional_paper"]={**conditional_paper.summary(db),"old_candidates_harvested":native_harvested,
-            "new_candidates_harvested":native_new,"risk_policy_migrated":native_migrated,"archive_recovery":native_archive_recovery,"this_run":native_result}
+            "new_candidates_harvested":native_new,"legacy_handoff":legacy_handoff,"risk_policy_migrated":native_migrated,"archive_recovery":native_archive_recovery,"this_run":native_result}
     report["new_coverage_debt_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (coverage.VERSION, first_technical)).fetchone()[0]
     report["new_combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=? AND rowid>?", (combination_research.VERSION, first_technical)).fetchone()[0]
     report["combination_trials"] = db.execute("SELECT COUNT(*) FROM attempts WHERE version=?", (combination_research.VERSION,)).fetchone()[0]

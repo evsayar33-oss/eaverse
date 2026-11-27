@@ -207,7 +207,7 @@ def render_panel(payload):
             st.subheader("Koşullu PAPER · Genişletilmiş stratejiler")
             nc=native.get("counts",{})
             cols=st.columns(4)
-            cols[0].metric("Pozitif aday değerlendirildi",native["total"])
+            cols[0].metric("Tarihsel aday kaydı",native["total"])
             cols[1].metric("Koşullu PAPER aktif",nc.get("conditional_active",0))
             cols[2].metric("Tarihsel elemede / yeniden kontrolde kaldı",
                            nc.get("screen_rejected",0)+nc.get("recheck_rejected",0))
@@ -238,14 +238,14 @@ def render_panel(payload):
                     f"{x['asset']} · {x['engine']} · {x['frame']} · {x['id'][:12]}")
                 if selected_native:
                     st.json(selected_native)
-            with st.expander("Tüm pozitif adayların karar dağılımı"):
+            with st.expander("Tüm adayların karar dağılımı"):
                 st.dataframe(native.get("by_engine",[]),hide_index=True)
                 st.dataframe(native.get("reasons",[]),hide_index=True)
                 st.caption("Arşiv ve veri nedeniyle bekleme, başarısız strateji veya açılmış işlem olarak sayılmaz.")
                 if native.get("decisions"):
                     st.dataframe(native["decisions"],hide_index=True)
                     if len(native["decisions"])<native["total"]:
-                        st.caption("İlk 5.000 karar gösteriliyor; tam kesin kimlikler kalıcı araştırma kaydında korunur.")
+                        st.caption(f"İlk {len(native['decisions']):,} karar gösteriliyor; tüm kesin kimlikler kalıcı araştırma kaydında korunur.")
         if research.get("markets"):
             with st.expander("Varlık evreni ve doğrulanan geçmiş", expanded=True):
                 coverage=research.get("history_summary",{})
