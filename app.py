@@ -202,6 +202,44 @@ def render_panel(payload):
                 if admission.get("historical_positive_by_engine"):
                     st.caption("Diğer motorlar: keşif ve tarihsel doğrulama neti pozitif olan denemeler. PAPER onayı değildir.")
                     st.dataframe(admission["historical_positive_by_engine"],hide_index=True)
+        native=research.get("conditional_paper")
+        if native and native.get("total"):
+            st.subheader("Koşullu PAPER · Genişletilmiş stratejiler")
+            nc=native.get("counts",{})
+            cols=st.columns(4)
+            cols[0].metric("Pozitif aday değerlendirildi",native["total"])
+            cols[1].metric("Koşullu PAPER aktif",nc.get("conditional_active",0))
+            cols[2].metric("Tarihsel elemede / yeniden kontrolde kaldı",
+                           nc.get("screen_rejected",0)+nc.get("recheck_rejected",0))
+            cols[3].metric("Kapasite bekleyen onaylı aday",nc.get("qualified_waiting_capacity",0))
+            st.caption("Bu izleme gerçek emir veya kesin PAPER/ACCEPT onayı değildir. "
+                       "Her stratejinin özgün motoru ve maliyetleri korunur. 90 gelecekte oluşan strateji barı; "
+                       "haftalık strateji için 90 tamamlanmış hafta. Short işlemleri varsayımsal ödünç maliyetlidir.")
+            pending=sum(nc.get(k,0) for k in ("awaiting_archive","queued","waiting_source","waiting_history","waiting_calendar"))
+            st.caption(f"Kanıt, veri veya yeniden doğrulama bekleyen: {pending:,} · Durdurulan: {nc.get('conditional_paused',0)} · "
+                       f"90 bar pozitif: {nc.get('conditional_completed_positive',0)} · 90 bar olumsuz: {nc.get('conditional_completed_failed',0)}")
+            if native.get("records"):
+                table=pd.DataFrame(native["records"])
+                table["historical_net_pct"]=pd.to_numeric(table["historical_net"],errors="coerce")*100
+                table["forward_net_pct"]=pd.to_numeric(table["forward_net"],errors="coerce")*100
+                columns=["asset","engine","frame","direction","status","historical_net_pct","registered",
+                         "observed_bars","target_bars","forward_net_pct","provisional","reason"]
+                st.dataframe(table[columns].rename(columns={"asset":"Varlık","engine":"Motor","frame":"Zaman dilimi",
+                    "direction":"Yön","status":"Durum","historical_net_pct":"Tarihsel net %","registered":"Kayıt tarihi",
+                    "observed_bars":"İleri bar","target_bars":"Hedef bar","forward_net_pct":"Koşullu net %","provisional":"Geçici ölçüm","reason":"Neden"}),
+                    hide_index=True)
+                selected_native=st.selectbox("Koşullu strateji kanıtı",native["records"],format_func=lambda x:
+                    f"{x['asset']} · {x['engine']} · {x['frame']} · {x['id'][:12]}")
+                if selected_native:
+                    st.json(selected_native)
+            with st.expander("Tüm pozitif adayların karar dağılımı"):
+                st.dataframe(native.get("by_engine",[]),hide_index=True)
+                st.dataframe(native.get("reasons",[]),hide_index=True)
+                st.caption("Arşiv ve veri nedeniyle bekleme, başarısız strateji veya açılmış işlem olarak sayılmaz.")
+                if native.get("decisions"):
+                    st.dataframe(native["decisions"],hide_index=True)
+                    if len(native["decisions"])<native["total"]:
+                        st.caption("İlk 5.000 karar gösteriliyor; tam kesin kimlikler kalıcı araştırma kaydında korunur.")
         if research.get("markets"):
             with st.expander("Varlık evreni ve doğrulanan geçmiş", expanded=True):
                 coverage=research.get("history_summary",{})

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from . import archive, checkpoint, combination_focus, combination_research, coverage, foundry, indicator_research, paper_admission, research as research_engine
+from . import archive, checkpoint, combination_focus, combination_research, conditional_paper, coverage, foundry, indicator_research, paper_admission, research as research_engine
 from .delivery import gh
 
 
@@ -62,6 +62,7 @@ def projection(db_path, report, run_url):
         research["markets"] = report.get("markets",{})
         research["history_summary"] = report.get("history_summary",{})
         research["paper_admission"] = report.get("paper_admission") or paper_admission.summary(db)
+        research["conditional_paper"] = report.get("conditional_paper") or conditional_paper.summary(db)
         research["archived_outcomes"] = archive.outcome_counts(db)
         research["combination_focus"] = combination_focus.dashboard(db)
         research["combination_focus_slice"] = report.get("combination_focus_slice",{})
