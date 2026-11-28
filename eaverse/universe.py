@@ -220,6 +220,18 @@ def queue(db, market, symbols, today, limit):
     pool.sort(key=lambda item: (progress[item]["visited"] if item in progress else "",
                                 item not in market.symbols, item))
     slots = max(0, limit - len(active))
+    # A rotating BIST batch can consist entirely of recent IPOs or previously
+    # rejected symbols. Reserve one existing slot for a mature seed, so a
+    # market-wide outage is evaluated against a real control on every run.
+    # If all seeds are in backoff, probe just the oldest one, not the entire set.
+    probe = []
+    if market.name=="BIST" and slots:
+        seeds=[s for s in market.symbols if s in symbols and s not in active]
+        eligible=[s for s in seeds if s in pool]
+        if seeds:
+            probe=[min(eligible or seeds,key=lambda s:(progress[s]["visited"] if s in progress else "",s))]
+            pool=[s for s in pool if s not in probe]
+            slots-=1
     known = [item for item in pool if item in progress and progress[item]["error"] is None]
     revisit = known[:slots // 4]
     remaining=[item for item in pool if item not in revisit]
@@ -228,7 +240,7 @@ def queue(db, market, symbols, today, limit):
         groups.extend([s for s in remaining if s.startswith(venue+":")] for venue in history_sources.VENUES)
         remaining=[v for row in zip_longest(*groups) for v in row if v is not None]
     rotating = remaining[:slots-len(revisit)]
-    return active + revisit + rotating
+    return active + probe + revisit + rotating
 
 
 def record(db, market, symbol, now, status):

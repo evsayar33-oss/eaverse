@@ -14,6 +14,7 @@ from functools import lru_cache
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import numpy as np
 import pandas as pd
 
 from . import data
@@ -221,32 +222,124 @@ def equity_calendar(name,today):
     return xcals.get_calendar(name,start=EQUITY_START,end=(today+timedelta(days=2)).isoformat())
 
 
-def equities_long(symbol,market,now):
+class BistHistoryError(ValueError):
+    """Invalid or incomplete BIST data; do not hide it with a legacy retry."""
+
+
+class InsufficientEquityHistory(ValueError):
+    """A genuinely short listing, rather than a damaged historic series."""
+
+
+def invalid_equity_rows(bars):
+    """Apply the unchanged data.validate OHLCV checks to individual rows."""
+    values=bars.astype(float)
+    invalid=~np.isfinite(values).all(axis=1) | (values[data.COLUMNS[:4]]<=0).any(axis=1)
+    tolerance=1e-12
+    return (invalid | (values.high<values[["open","close","low"]].max(axis=1)*(1-tolerance))
+            | (values.low>values[["open","close","high"]].min(axis=1)*(1+tolerance))
+            | (values.volume<0))
+
+
+def equity_frame(raw):
+    bars=raw.rename(columns=str.lower)[data.COLUMNS].copy()
+    bars.index=bars.index.tz_localize(None).normalize()
+    if not bars.index.is_unique or not bars.index.is_monotonic_increasing:
+        raise BistHistoryError("duplicate or unordered BIST daily bars")
+    return bars
+
+
+def bist_completed_history(ticker,bars,completed,end):
+    """Recover an actual one-session Yahoo response, then keep a valid suffix."""
+    latest=completed[-1]
+    if len(completed[completed>=bars.index[0]])<600:
+        raise InsufficientEquityHistory("fewer than 600 completed bars (short listing history)")
+    refetched=False
+    if latest not in bars.index or invalid_equity_rows(bars.loc[[latest]]).iloc[0]:
+        try:
+            # Yahoo can return null adjusted OHLC in a multi-year response yet
+            # supply the complete DAILY candle for the identical end boundary.
+            # Never use intraday last trade, zero fill, or an inferred close.
+            raw=ticker.history(start=latest.date().isoformat(),end=end,interval="1d",
+                               auto_adjust=True,actions=False,timeout=15)
+            corrected=equity_frame(raw)
+            if not corrected.index.equals(pd.DatetimeIndex([latest])) or invalid_equity_rows(corrected).any():
+                raise ValueError("exact-session daily response is missing or invalid")
+            if latest in bars.index:
+                old=bars.loc[latest]
+                new=corrected.iloc[0]
+                # Remaining valid fields must agree. This prevents mixing
+                # adjustment bases or silently replacing conflicting prices.
+                comparable=np.isfinite(old) & (old>0)
+                comparable.loc["volume"]=np.isfinite(old["volume"]) and old["volume"]>=0
+                if not np.isclose(old[comparable],new[comparable],rtol=1e-12,atol=0).all():
+                    raise ValueError("exact-session daily response conflicts with available OHLCV")
+                if comparable["volume"] and old["volume"]!=new["volume"]:
+                    raise ValueError("exact-session daily volume conflicts")
+            bars=pd.concat([bars.drop(index=latest,errors="ignore"),corrected]).sort_index()
+            refetched=True
+        except Exception as exc:
+            raise BistHistoryError(f"BIST latest completed session {latest.date()} unavailable: {type(exc).__name__}: {exc}") from exc
+    expected=completed[completed>=bars.index[0]]
+    missing=expected.difference(bars.index)
+    extra=bars.index.difference(expected)
+    invalid=bars.index[invalid_equity_rows(bars)]
+    anomalies=missing.union(extra).union(invalid)
+    status="provider_history_boundary"
+    if len(anomalies):
+        # Never delete a row inside the research window or accept a stale
+        # final session. Only discard the old prefix through the last anomaly.
+        cutoff=anomalies[-1]
+        expected=expected[expected>cutoff]
+        if len(expected)<600:
+            raise BistHistoryError(f"BIST history integrity: {len(expected)} contiguous completed sessions after {cutoff.date()} (600 required)")
+        bars=bars.loc[bars.index>cutoff]
+        status="truncated_history_integrity"
+    result=data.validate(bars,expected)
+    if refetched:
+        status+=":exact_daily_refetch"
+    result.attrs.update(history_status=status,latest_daily_refetched=refetched,
+                        excluded_history_through=str(anomalies[-1].date()) if len(anomalies) else None)
+    return result
+
+
+def equities_long(symbol,market,now,*,start=EQUITY_START):
     import yfinance as yf
     cal=equity_calendar(market.calendar,now.date())
     sessions=cal.sessions[cal.sessions<=pd.Timestamp(now.date())]
     completed=sessions[(cal.schedule.loc[sessions,"close"]<=pd.Timestamp(now-timedelta(minutes=90))).to_numpy()]
     if completed.tz is not None:
         completed=completed.tz_localize(None)
-    bars=yf.Ticker(symbol).history(start=EQUITY_START,end=(now.date()+timedelta(days=1)).isoformat(),
-                                  interval="1d",auto_adjust=True,actions=False,timeout=15)
-    if bars.empty or not len(completed):
+    if not len(completed):
+        raise ValueError("no completed exchange sessions")
+    # Keep both BIST requests on the same adjustment horizon and never ask
+    # for an unfinished bar. Other markets retain the existing request.
+    end=((completed[-1].date() if market.name=="BIST" else now.date())+timedelta(days=1)).isoformat()
+    ticker=yf.Ticker(symbol)
+    raw=ticker.history(start=start,end=end,interval="1d",auto_adjust=True,actions=False,timeout=15)
+    if raw.empty:
         raise ValueError("Yahoo returned no completed history")
-    bars=bars.rename(columns=str.lower)[data.COLUMNS].copy()
-    bars.index=bars.index.tz_localize(None).normalize()
+    if market.name=="BIST":
+        bars=equity_frame(raw)
+    else:
+        bars=raw.rename(columns=str.lower)[data.COLUMNS].copy()
+        bars.index=bars.index.tz_localize(None).normalize()
     bars=bars.loc[(bars.index>=completed[0])&(bars.index<=completed[-1])]
     if bars.empty:
         raise ValueError("Yahoo returned no completed history")
-    # A listing starts at its first observed bar; never manufacture pre-IPO prices.
-    expected=completed[completed>=bars.index[0]]
-    status="provider_history_boundary"
-    gaps=expected.difference(bars.index)
-    if len(gaps) and (expected>gaps[-1]).sum()>=600:
-        expected=expected[expected>gaps[-1]]
-        bars=bars.loc[expected[0]:]
-        status="truncated_gap"
-    result=data.validate(bars,expected)
-    result.attrs.update(history_status=status,requested_start=EQUITY_START,
+    if market.name=="BIST":
+        result=bist_completed_history(ticker,bars,completed,end)
+        status=result.attrs["history_status"]
+    else:
+        # A listing starts at its first observed bar; never manufacture pre-IPO prices.
+        expected=completed[completed>=bars.index[0]]
+        status="provider_history_boundary"
+        gaps=expected.difference(bars.index)
+        if len(gaps) and (expected>gaps[-1]).sum()>=600:
+            expected=expected[expected>gaps[-1]]
+            bars=bars.loc[expected[0]:]
+            status="truncated_gap"
+        result=data.validate(bars,expected)
+    result.attrs.update(history_status=status,requested_start=start,
                         history_from=str(result.index[0].date()),history_through=str(result.index[-1].date()),
                         history_bars=len(result))
     return result
@@ -257,6 +350,22 @@ def load(market,symbol,now):
     if market.source in VENUES.values():
         venue,pair=symbol.split(":",1)
         return venue_history(venue,pair,now)
+    if market.name=="BIST":
+        try:
+            return equities_long(symbol,market,now)
+        except (BistHistoryError,InsufficientEquityHistory):
+            raise
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            # A long-range transport/empty response may work with six years.
+            # Apply the same BIST integrity checks on the shorter request.
+            try:
+                result=equities_long(symbol,market,now,start=(now-timedelta(days=2192)).date().isoformat())
+            except (BistHistoryError,InsufficientEquityHistory):
+                raise
+            except Exception as fallback:
+                raise BistHistoryError(f"Yahoo BIST history unavailable: {type(exc).__name__}: {exc}; retry: {type(fallback).__name__}: {fallback}") from fallback
+            result.attrs["history_status"]+=":shorter_request"
+            return result
     try:
         return coinbase_long(symbol,now) if market.source=="coinbase" else equities_long(symbol,market,now)
     except (OSError,ValueError,TypeError,KeyError,RuntimeError) as exc:

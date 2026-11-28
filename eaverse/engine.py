@@ -355,7 +355,9 @@ def discover(db, asset, market, bars, now, budget):
             "paper_eligible": market.source in ("coinbase","yahoo"),
             "history":{"source":market.source,"bars":len(bars),"from":date(bars.index[0]),"through":asof,
                        "status":bars.attrs.get("history_status","legacy_or_fixture"),
-                       "requested_start":bars.attrs.get("requested_start")}}
+                       "requested_start":bars.attrs.get("requested_start"),
+                       "latest_daily_refetched":bars.attrs.get("latest_daily_refetched",False),
+                       "excluded_history_through":bars.attrs.get("excluded_history_through")}}
 
 
 def fetch_bars(market, symbol, now):
@@ -475,7 +477,8 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
             catalogs[market.name] = symbols
             queues.append((market, selected))
             market_reports[market.name] = {**listing, "universe": len(symbols), "scheduled": len(selected),
-                                          "screened": 0, "unavailable": 0}
+                                          "screened": 0, "unavailable": 0,
+                                          "insufficient_history": 0, "failure_reasons": {}}
         focus_asset,focus_mode=combination_focus.select(db,catalogs,now.date())
         if focus_asset:
             name,symbol=focus_asset.split(":",1)
@@ -665,8 +668,12 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
                         db.execute("INSERT OR REPLACE INTO paper_data_issues VALUES (?,?)", (asset, failure))
                     if tracked or symbol in market.symbols:
                         health(db, asset, failure)
-                market_reports[market.name]["unavailable"] += 1
-            print(asset, "coverage error" if failure else "screened", flush=True)
+                outcome=market_reports[market.name]
+                outcome["unavailable"] += 1
+                outcome["insufficient_history"] += int(status=="insufficient_history")
+                reasons=outcome["failure_reasons"]
+                reasons[failure]=reasons.get(failure,0)+1
+            print(asset, f"coverage error: {failure}" if failure else "screened", flush=True)
         # Once active PAPER has been advanced, spend the reserved slice on
         # the same focus asset before the remaining broad rotation.
         if focus_asset and not focus_done and focus_data is not None and not paper_remaining:
@@ -691,8 +698,18 @@ def run(db, market_names, budget, event_budget=6, asset_limit=None, daily_report
     report["combination_focus"]=combination_focus.dashboard(db)
     with db:
         for name, outcome in market_reports.items():
-            market_error = "no symbols could be screened" if not outcome["screened"] and outcome["unavailable"] else None
-            health(db, f"market:{name}", market_error)
+            market_error=None
+            if not outcome["screened"] and outcome["unavailable"]:
+                short=outcome["insufficient_history"]
+                other=outcome["unavailable"]-short
+                reasons=sorted(outcome["failure_reasons"].items(),key=lambda r:(-r[1],r[0]))
+                detail="; ".join(f"{count}x {reason}" for reason,count in reasons[:2])
+                market_error=(f"0/{outcome['unavailable']} varlık tarandı; {short} yetersiz geçmiş, "
+                              f"{other} veri/bütünlük sorunu. {detail}")[:450]
+            # No scheduled/attempted symbol is not proof that a failed
+            # market recovered. Preserve the existing failure episode.
+            if outcome["screened"] or outcome["unavailable"]:
+                health(db, f"market:{name}", market_error)
     if daily_report:
         events.write_daily(daily_report, daily_records)
     with db:
