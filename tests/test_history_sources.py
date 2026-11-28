@@ -85,6 +85,102 @@ class HistorySourcesTests(unittest.TestCase):
         self.assertEqual(len(bars),3000)
         self.assertEqual(bars.attrs["history_from"],str(dates[0].date()))
 
+    def bist_fixture(self):
+        market=data.MARKETS[2]
+        cal=hs.equity_calendar(market.calendar,NOW.date())
+        completed=cal.sessions[cal.schedule["close"]<=pd.Timestamp(NOW-timedelta(minutes=90))]
+        dates=completed[-1000:]
+        bars=pd.DataFrame({"open":10.0,"high":11.0,"low":9.0,"close":10.5,"volume":100.0},index=dates)
+        return market,bars
+
+    def test_bist_recovers_actual_daily_candle_with_same_end_and_adjustment(self):
+        market,valid=self.bist_fixture()
+        latest=valid.index[-1]
+        damaged=valid.copy()
+        damaged.loc[latest,["open","high","low","close"]]=float("nan")
+        damaged.iloc[10,3]=-1
+        # Older historic invalid rows must not poison the current window.
+        with patch("yfinance.Ticker") as ticker:
+            history=ticker.return_value.history
+            history.side_effect=[damaged,valid.iloc[[-1]]]
+            result=hs.load(market,"THYAO.IS",NOW)
+        pd.testing.assert_frame_equal(result,valid.iloc[11:],check_freq=False)
+        self.assertTrue(result.attrs["latest_daily_refetched"])
+        self.assertEqual(result.attrs["excluded_history_through"],str(valid.index[10].date()))
+        self.assertEqual(result.attrs["history_status"],"truncated_history_integrity:exact_daily_refetch")
+        a,b=[c.kwargs for c in history.call_args_list]
+        self.assertEqual(a["end"],b["end"])
+        self.assertEqual(a["end"],str((latest+pd.Timedelta(days=1)).date()))
+        self.assertEqual(b["start"],str(latest.date()))
+        self.assertTrue(a["auto_adjust"] and b["auto_adjust"])
+        self.assertEqual(b["interval"],"1d")
+
+    def test_bist_exact_refetch_rejects_conflict_or_missing_latest(self):
+        market,valid=self.bist_fixture()
+        damaged=valid.copy()
+        damaged.iloc[-1,3]=float("nan")
+        conflict=valid.iloc[[-1]].copy()
+        conflict.iloc[0,4]=101
+        for replacement in (conflict,valid.iloc[[-2]],valid.iloc[0:0],damaged.iloc[[-1]]):
+            with self.subTest(replacement=replacement),patch("yfinance.Ticker") as ticker,patch.object(data,"load") as legacy:
+                ticker.return_value.history.side_effect=[damaged,replacement]
+                with self.assertRaisesRegex(hs.BistHistoryError,"latest completed session"):
+                    hs.load(market,"THYAO.IS",NOW)
+                legacy.assert_not_called()
+                self.assertEqual(ticker.return_value.history.call_count,2)
+
+    def test_bist_missing_or_unfinished_days_are_not_filled(self):
+        market,valid=self.bist_fixture()
+        # No exact latest bar in the long request: fetch it from the same provider.
+        with patch("yfinance.Ticker") as ticker:
+            ticker.return_value.history.side_effect=[valid.iloc[:-1],valid.iloc[[-1]]]
+            result=hs.load(market,"THYAO.IS",NOW)
+        pd.testing.assert_frame_equal(result,valid,check_freq=False)
+        # A recent missing session cannot be hidden by dropping only the hole.
+        damaged=valid.drop(index=valid.index[-30])
+        with patch("yfinance.Ticker") as ticker:
+            ticker.return_value.history.return_value=damaged
+            with self.assertRaisesRegex(hs.BistHistoryError,"600 required"):
+                hs.load(market,"THYAO.IS",NOW)
+            self.assertEqual(ticker.return_value.history.call_count,1)
+
+    def test_bist_calendar_conflict_is_trimmed_only_when_old(self):
+        market,valid=self.bist_fixture()
+        weekend=pd.Timestamp("2024-01-06")
+        self.assertNotIn(weekend,valid.index)
+        extra=valid.iloc[[0]].copy()
+        extra.index=pd.DatetimeIndex([weekend])
+        damaged=pd.concat([valid,extra]).sort_index()
+        with patch("yfinance.Ticker") as ticker:
+            ticker.return_value.history.return_value=damaged
+            result=hs.load(market,"THYAO.IS",NOW)
+        pd.testing.assert_frame_equal(result,valid.loc[valid.index>weekend],check_freq=False)
+        self.assertEqual(result.attrs["excluded_history_through"],str(weekend.date()))
+        self.assertFalse(result.attrs["latest_daily_refetched"])
+
+    def test_bist_short_listing_keeps_minimum_and_does_not_repeat_requests(self):
+        market,valid=self.bist_fixture()
+        with patch("yfinance.Ticker") as ticker:
+            ticker.return_value.history.return_value=valid.iloc[-180:]
+            with self.assertRaisesRegex(hs.InsufficientEquityHistory,"fewer than 600"):
+                hs.load(market,"NEW.IS",NOW)
+            self.assertEqual(ticker.return_value.history.call_count,1)
+
+    def test_bist_mature_probe_does_not_expand_budget_or_displace_paper(self):
+        market=data.MARKETS[2]
+        symbols=list(market.symbols)+["NEW1.IS","NEW2.IS","NEW3.IS"]
+        with engine.connect(":memory:") as db:
+            db.execute("""INSERT INTO paper(asset,spec,cost,start,anchor,cutoff,digest,version,policy,origin,status)
+                VALUES ('BIST:TRACKED.IS','{}',25,'x','x','x','x','x','x','{}','active')""")
+            for s in market.symbols:
+                universe.record(db,market.name,s,NOW,"unavailable")
+            selected=universe.queue(db,market,symbols,NOW.date(),4)
+            self.assertEqual(selected[0],"TRACKED.IS")
+            self.assertIn(selected[1],market.symbols)
+            self.assertEqual(len(selected),4)
+            self.assertEqual(len(set(selected)&set(market.symbols)),1)
+            self.assertEqual(universe.queue(db,market,symbols,NOW.date(),1),["TRACKED.IS"])
+
     def test_legacy_cache_preserved_even_with_other_live_source(self):
         market=data.MARKETS[0]
         day=date(2026,11,26)

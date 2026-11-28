@@ -51,6 +51,28 @@ class AutonomousRunTests(unittest.TestCase):
             assets=db.execute("SELECT DISTINCT asset FROM attempts WHERE version=?",(engine.combination_research.VERSION,)).fetchall()
             self.assertEqual([row[0] for row in assets],["CRYPTO:BTC-USD"])
 
+    def test_market_alert_distinguishes_short_history_from_data_failure(self):
+        market=data.MARKETS[2]
+        symbols=["THYAO.IS","NEW.IS"]
+        with engine.connect(":memory:") as db,patch.dict(os.environ,{"GITHUB_ACTIONS":"false"}), \
+                patch.object(engine.universe,"refresh",return_value=(symbols,{"listing_date":"2026-11-28"})), \
+                patch.object(engine.universe,"queue",return_value=symbols), \
+                patch.object(engine.combination_focus,"select",return_value=(None,None)), \
+                patch.object(engine,"fetch_bars",side_effect=lambda m,s,n:(None,"BistHistoryError: latest completed session unavailable" if s=="THYAO.IS" else "InsufficientEquityHistory: fewer than 600 completed bars")):
+            for _ in range(2):
+                report=engine.run(db,[market.name],1,event_budget=0,asset_limit=2)
+            outcome=report["markets"]["BIST"]
+            self.assertEqual((outcome["screened"],outcome["unavailable"],outcome["insufficient_history"]),(0,2,1))
+            msg=db.execute("SELECT message FROM outbox WHERE id='data:market:BIST:1'").fetchone()[0]
+            self.assertIn("1 yetersiz geçmiş",msg)
+            self.assertIn("1 veri/bütünlük sorunu",msg)
+            self.assertIn("latest completed session unavailable",msg)
+            # A run with no attempted symbols must not clear this alert.
+            with patch.object(engine.universe,"queue",return_value=[]):
+                engine.run(db,[market.name],1,event_budget=0,asset_limit=2)
+            row=db.execute("SELECT failures FROM health WHERE asset='market:BIST'").fetchone()
+            self.assertEqual(row[0],2)
+
     def test_disabled_events_still_run_coverage(self):
         with engine.connect(":memory:") as db, patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
             report = engine.run(db, [], 1, event_budget=0)

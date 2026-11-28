@@ -1,1 +1,1 @@
-Fix cross-market backlog routing and hand off regular candidates to uncapped conditional recovery (2026-11-27).
+Recover validated BIST completed daily candles and restart normal research from the existing checkpoint (2026-11-28).
